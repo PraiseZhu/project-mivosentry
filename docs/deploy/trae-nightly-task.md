@@ -5,7 +5,8 @@
 ## 路径与环境（2026-08-01 已在 macmini 实测确认）
 
 - **MivoSentry 仓在 macmini 上的绝对路径**：`/Users/praise/AI-Agent/Claude/projects/Project MivoSentry`（**经 Syncthing 从本机双向同步而来，不是独立 clone**；已实测存在。Syncthing 同步范围为 `~/About Praise`、`~/AI-Agent`、`/Volumes/AKB2/Obsidian` 三个目录）。
-- **目标审计仓（MivoCanvas）绝对路径**：`/Users/praise/mivo-ops/mivo-canvas`（bug-doctor loop 的 checkout，**不在 Syncthing 范围内**；已实测存在，`history/loops/` 已被 `.gitignore` 排除故 loop 日志不污染 porcelain）。
+- **目标审计仓（MivoCanvas）绝对路径**：`/Users/praise/mivo-ops/mivo-canvas`（bug-doctor loop 的 checkout，**不在 Syncthing 范围内**；已实测存在，`history/loops/` 已被 `.gitignore` 排除故 loop 日志不污染 porcelain）。该 checkout 以 ff-only 跟随 `origin/main`，空闲时干净，代表**已发布的 main**——这正是审计该看的东西。
+- **⚠ 不要审计 `/Users/praise/AI-Agent/Claude/projects/Project MivoCanvas`**：Syncthing 把本机的 MivoCanvas 开发工作区也同步到了 mini，它就位于 MivoSentry 旁边、路径形态相似，极易误取。但那是 owner 的在途开发工作区（随时处于任意特性分支与脏状态），审计它只会得到"owner 此刻正在改的半成品"这类噪声，且其状态每几秒就被 Syncthing 改动一次，必然触发 G1 的只读自检失败。审计目标只有上面那一个。
 
 ### 硬纪律：本管道只在 macmini 上运行
 
