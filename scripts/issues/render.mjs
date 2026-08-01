@@ -110,6 +110,45 @@ function groupByDim(findings) {
   return map;
 }
 
+// ---------- 人话解释层（2026-08-02，owner 决策 1a）----------
+//
+// 动机：晨报/issue 的读者是接手的同事，不是写扫描器的人。"类型逃逸 ×3" 对后者
+// 是术语、对前者是谜语。每类 finding 配一段固定的人话：它是什么、为什么值得管、
+// 该往哪个方向处理。
+//
+// 全部是写死的静态文案（不含 finding 内容插值），因此本身无注入面；
+// 按 category 精确匹配不到时回退到 dim 级，再回退到 category 原文（会经渲染层转义）。
+
+const EXPLAIN_BY_CATEGORY = {
+  '依赖漏洞': '项目用的第三方包有已公开的安全漏洞。不是我们的代码写错，是上游包的问题；证据里写了受影响版本区间与有没有修复版，升级依赖即可，通常不用改业务代码。',
+  '疑似硬编码密钥/密码': '代码里疑似把密钥/密码直接写死在源码里（具体值已脱敏）。若是真实凭证：立即轮换，并改成从环境变量或密钥管理读取；若只是测试假值：建议换个不像真密钥的写法，免得每晚被扫出来。',
+  'dangerouslySetInnerHTML 使用': '直接把字符串塞进 HTML 渲染。只要内容里混入过用户可控的输入，就是 XSS 注入口；确认数据来源可信，或改用安全的渲染方式。',
+  'eval() 使用': 'eval 会把任意字符串当代码执行，是代码注入的经典入口，几乎总有更安全的替代写法。',
+  '过期TODO': '这条 TODO/FIXME 已经躺了超过 90 天没人动。要么排期做掉，要么承认不做、把注释删掉——别让它继续假装是计划。',
+  '类型逃逸': '这里用 any / as any / @ts-ignore 绕过了 TypeScript 类型检查。绕过之后编译器就帮不上忙了，运行时错误最容易藏在这种地方。',
+  '缺失测试': '这个源码文件没有对应的测试文件，它的行为没有任何自动化保护，改坏了只能靠人肉发现。',
+  '超长文件': '文件超过 300 行。不是 bug，是维护性指标：这种文件改动影响面大、review 困难，值得找机会拆分。',
+  '超长函数': '函数超过 80 行。同上，属于维护性指标而非缺陷。',
+  '循环依赖': '模块之间互相依赖成环（A 用 B、B 又用 A）。会让加载顺序变得敏感、无法单独测试其中一个，重构时容易连环踩雷。',
+};
+
+const EXPLAIN_BY_DIM = {
+  'deps-vuln': EXPLAIN_BY_CATEGORY['依赖漏洞'],
+  'dead-code': '这段代码没有任何地方在用（未使用的变量/导出）。留着会误导后来人以为它有用，确认后删除即可。',
+  'todo-stale': EXPLAIN_BY_CATEGORY['过期TODO'],
+  'log-violation': '违反项目日志规范（verify:logging 不通过）：会改状态/会失败的操作缺少 debugLogger 落日志，出问题时查不到现场。',
+  'type-escape': EXPLAIN_BY_CATEGORY['类型逃逸'],
+  'secret-pattern': '命中了密钥/危险 API 的文本模式，具体含义见类别列。',
+  'circular-dep': EXPLAIN_BY_CATEGORY['循环依赖'],
+  'test-health': '测试健康度问题：.skip/.only 残留会让 CI 绿灯变假（整段被跳过或只跑一个用例）；缺失测试则是行为无保护。',
+  'debt-metric': '体量指标（超长文件/函数）。不是缺陷，是"改这里要格外小心"的地图标记。',
+};
+
+/** 返回该 finding 的人话解释（静态文案；匹配不到时回退 category 原文，由调用方转义）。 */
+export function explainFinding(f) {
+  return EXPLAIN_BY_CATEGORY[f.category] ?? EXPLAIN_BY_DIM[f.dim] ?? String(f.category ?? '');
+}
+
 /**
  * @param {object} finding G1 findings 记录（含 file/line/category/evidence/severity/verify/fingerprint/dim）
  * @param {{repo: string, scanDate: string, commit: string}} ctx
@@ -127,6 +166,8 @@ export function renderSingleIssue(finding, ctx) {
   const labels = ['trae-audit', finding.severity];
   const body = [
     '## 问题描述',
+    sanitizeParagraph(explainFinding(finding)),
+    '',
     `实际: ${category} — ${evidence}`,
     '期望: 按下方复现步骤验证问题不再出现，再关闭本 issue。',
     '',
@@ -177,31 +218,38 @@ export function renderSummaryIssue(classified, ctx) {
   const topInsertIndex = lines.length;
 
   push('');
-  push('## 汇总');
+  push('## 汇总（按严重度排列，P3 只报聚合数）');
 
-  const byDim = groupByDim(classified.summaryNormal);
+  // 2026-08-02 owner 决策 1a：P3 不再逐条进表——886 条存量指标塞进公司仓 issue，
+  // 无论截不截断都是噪音（表格没人读，只会觉得机器人在刷屏），还必然触发体量截断。
+  // P0/P1/P2 逐条列出并按严重度分节；P3 只报每维度的聚合计数，明细留在夜巡机器的
+  // 晨报与 findings JSON 里（那是 owner 的巡检数据，不是团队待办）。
+  const actionable = classified.summaryNormal.filter((f) => f.severity !== 'P3');
+  const p3Items = classified.summaryNormal.filter((f) => f.severity === 'P3');
   let omittedRows = 0;
   let budgetExceeded = false;
 
-  if (byDim.size === 0) {
+  if (actionable.length === 0) {
     push('');
-    push('（本轮无字段齐全的汇总项）');
+    push('（本轮无 P0/P1/P2 级汇总项）');
   }
-  for (const [dim, items] of byDim) {
+  for (const sev of ['P0', 'P1', 'P2']) {
+    const items = actionable.filter((f) => f.severity === sev);
+    if (items.length === 0) continue;
     if (budgetExceeded) {
       omittedRows += items.length;
       continue;
     }
     push('');
-    push(`### ${escapeCell(dim)}`);
-    push('| 文件:行 | 类别 | 严重度 | 证据 | 验证 | 指纹 |');
+    push(`### ${sev}（${items.length} 条）`);
+    push('| 位置 | 维度 | 问题 | 证据 | 验证 | 指纹 |');
     push('|---|---|---|---|---|---|');
     for (const f of items) {
       if (budgetExceeded) {
         omittedRows += 1;
         continue;
       }
-      const row = `| ${fileLineCell(f.file, f.line)} | ${escapeCell(f.category)} | ${escapeCell(f.severity)} | ${escapeCell(scrubSecrets(f.evidence))} | ${inlineCodeCell(scrubSecrets(f.verify))} | ${escapeCell(f.fingerprint)} |`;
+      const row = `| ${fileLineCell(f.file, f.line)} | ${escapeCell(f.dim)} | ${escapeCell(explainFinding(f))} | ${escapeCell(scrubSecrets(f.evidence))} | ${inlineCodeCell(scrubSecrets(f.verify))} | ${escapeCell(f.fingerprint)} |`;
       if (runningLength + row.length + 1 > MAX_SUMMARY_BODY_CHARS) {
         budgetExceeded = true;
         omittedRows += 1;
@@ -209,6 +257,16 @@ export function renderSummaryIssue(classified, ctx) {
       }
       push(row);
     }
+  }
+
+  if (p3Items.length > 0) {
+    push('');
+    push(`## P3 存量指标（共 ${p3Items.length} 条，不逐条列出）`);
+    for (const [dim, items] of groupByDim(p3Items)) {
+      push(`- ${escapeCell(dim)}：${items.length} 条 — ${escapeCell(EXPLAIN_BY_DIM[dim] ?? '')}`);
+    }
+    push('');
+    push('这些是存量维护性指标，不是当下要修的缺陷；逐条明细保存在夜巡机器当日的晨报与 findings JSON 中，不随本 issue 附带。');
   }
 
   if (classified.summaryLowConfidence.length > 0) {
@@ -233,9 +291,12 @@ export function renderSummaryIssue(classified, ctx) {
 
   // round-3 D-D：截断不是分片方案，只是 fail-safe——省略了多少行、去哪找完整清单，
   // 顶部（对账区旁）和正文尾部都要看得到，不许静默丢弃。
+  // 2026-08-02 修：指针只写文件名不写绝对路径——issue 发在公司仓里，夜巡机器的本机
+  // 绝对路径对读者是死链接，还顺带泄露 owner 的目录结构。
   if (omittedRows > 0) {
-    const path = findingsPath ?? `state/findings-${scanDate}.json`;
-    const omissionNote = `> 因体量限制省略 ${omittedRows} 行，完整清单见当日 findings JSON（${path}）`;
+    const rawPath = findingsPath ?? `state/findings-${scanDate}.json`;
+    const fileName = String(rawPath).split('/').pop();
+    const omissionNote = `> 因体量限制省略 ${omittedRows} 行，完整清单见夜巡机器当日的 findings JSON（${fileName}，不随本 issue 附带）`;
     lines.splice(topInsertIndex, 0, '', omissionNote);
     push('');
     push(omissionNote);

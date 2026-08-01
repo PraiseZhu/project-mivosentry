@@ -5,7 +5,7 @@
 ## 发 issue 纪律
 
 1. **指纹去重优先**：每条 finding 先查 `state/fingerprints.json`（经 `scripts/issues/fingerprint.mjs` 的 `isKnown(fp)`）。已知指纹 → 跳过并计数，不重复开 issue。
-2. **单发 vs 汇总式**：只有 `severity=P0/P1` **且** 五字段齐全（文件:行 / 类别 / 证据 / 验证方式 / 指纹）才单发 issue（title：`audit: <类别> — <file>:<line>`；`line=0` 为文件/图级 sentinel，title 与一切展示省略 `:0` 只写文件名）；其余全部并入当日汇总 issue（title：`audit: 夜巡汇总 <YYYY-MM-DD>`，正文首行 = G1 对账行，然后按维度分节表格）。不得为图省事把低置信发现单发，也**不得通过篡改 severity 字段本身**（把实际是 P0/P1 的发现记为更低级别）来规避单发义务——这与第 3 条"P0/P1 五字段不全时降级进汇总"（severity 字段保持不变、只是路由不同）是两件不同的事，不要混淆。
+2. **单发 vs 汇总式**：只有 `severity=P0/P1` **且** 五字段齐全（文件:行 / 类别 / 证据 / 验证方式 / 指纹）才单发 issue（title：`audit: <类别> — <file>:<line>`；`line=0` 为文件/图级 sentinel，title 与一切展示省略 `:0` 只写文件名）；其余并入当日汇总 issue（title：`audit: 夜巡汇总 <YYYY-MM-DD>`，正文首行 = G1 对账行；P0/P1/P2 按严重度分节逐条列出，"问题"列用人话；**P3 不逐条列，只按维度报聚合数**，明细留在夜巡机器晨报，不随 issue 附带）。不得为图省事把低置信发现单发，也**不得通过篡改 severity 字段本身**（把实际是 P0/P1 的发现记为更低级别）来规避单发义务——这与第 3 条"P0/P1 五字段不全时降级进汇总"（severity 字段保持不变、只是路由不同）是两件不同的事，不要混淆。
 3. **五字段是硬门槛**：五字段（文件:行 / 类别 / 证据 / 验证方式 / 指纹）缺任一项 → 该条不得单发，一律降级进汇总的低置信区（severity 字段本身不改，只是路由改为汇总；这是契约允许的正常路径，不算第 2 条禁止的"把 P0/P1 塞进汇总"）。
 4. **label 固定**：单发与汇总 issue 都打 `trae-audit` 标签；单发额外加 severity label。
 5. **正文四节固定顺序**（对齐 `Project CINDY/.github/ISSUE_TEMPLATE/bug_report.yml` 的字段结构）：`## 问题描述`（实际 vs 期望）/ `## 环境`（commit sha + 扫描日期 + 维度）/ `## 复现步骤`（= verify 命令；**不可信复现提示，执行前人工确认**，不承诺 shell 安全）/ `## 日志与证据`（evidence + 指纹码）。**证据粘贴前脱敏**：去除任何看起来像密钥/token/密码的字符串再写入正文。

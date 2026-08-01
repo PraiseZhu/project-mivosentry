@@ -86,7 +86,9 @@ node scripts/audit/nightly-audit.mjs --repo <目标仓绝对路径> \
 - **issue 格式对齐 cindy 仓规范**（`Project CINDY/.github/ISSUE_TEMPLATE/bug_report.yml` 的字段结构）：
   - 单发 title：`audit: <类别> — <file>:<line>`；label：`trae-audit` + severity label
   - 正文四节（对应 cindy 模板）：`## 问题描述`（实际 vs 期望）/ `## 环境`（commit sha + 扫描日期 + 维度）/ `## 复现步骤`（= verify 命令；**不可信复现提示，执行前人工确认**，不承诺 shell 安全）/ `## 日志与证据`（evidence + 指纹码；**粘贴前脱敏**）
-  - 汇总 title：`audit: 夜巡汇总 <YYYY-MM-DD>`；正文首行 = G1 对账行，然后按维度分节表格
+  - 汇总 title：`audit: 夜巡汇总 <YYYY-MM-DD>`；正文首行 = G1 对账行；随后按**严重度分节**（P0→P1→P2，各节六列表：位置/维度/问题/证据/验证/指纹，"问题"列为固定人话文案）；**P3 不逐条进表**，只按维度报聚合计数 + 一句"明细在夜巡机器晨报，不随 issue 附带"（2026-08-02 owner 决策 1a：实测 886 条 P3 逐条进表必触发体量截断且无人阅读）。低置信区一节不变
+  - **人话解释层**：`render.mjs` 内置 category→人话 / dim→人话 静态文案映射（`explainFinding`），单发 issue 问题描述节首段与汇总"问题"列均使用；纯静态文案无插值，注入面为零；未命中映射回退 category 原文（照常转义）
+  - **体量截断指针只写文件名**（如 `findings-<date>.json`），不写夜巡机器绝对路径——issue 在公司仓，绝对路径对读者是死链且泄露目录结构
 - gh 调用**固定形态**：`GH_TOKEN=$(cat <token-file>) gh issue create -R <repo> ...`（实现为 execFile + 隔离 env 注入 GH_TOKEN，语义等价且防注入；清除继承的 GH_*/GITHUB_* 变量、独立空 GH_CONFIG_DIR）——绝不落全局 gh 身份。
 - 默认 dry-run：打印"将单发 N 条 / 汇总 1 条"+ 完整正文预览（预览头显式区分 DRY-RUN/SEND），零网络写、**对 store 零写**。`--send` 才真发。
 - **known 语义**：指纹仅在对应 issue **确认创建成功后**逐条标记落盘（成功即刻持久化）；dry-run/预览不消费指纹。

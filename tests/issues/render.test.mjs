@@ -234,7 +234,9 @@ test('renderSummaryIssue：正文超过安全预算时按行截断，顶部对�
   });
   assert.ok(body.length < 65_000, `截断后正文应控制在安全上限附近，实际 ${body.length}`);
   assert.match(body, /因体量限制省略 \d+ 行/);
-  assert.match(body, /state\/findings-2026-08-01\.json/);
+  // 2026-08-02 修：指针只写文件名，不泄露夜巡机器的目录结构（issue 发在公司仓里）
+  assert.match(body, /findings-2026-08-01\.json/);
+  assert.ok(!body.includes('state/findings'), '省略提示不应包含目录前缀，只写文件名');
   const summaryIdx = body.indexOf('## 汇总');
   const topPart = body.slice(0, summaryIdx);
   assert.match(topPart, /因体量限制省略/, '顶部对账区（"## 汇总" 之前）也应出现省略提示，不能只在尾部');
@@ -248,4 +250,62 @@ test('renderSummaryIssue：正文在预算内时不出现省略提示（回归�
   };
   const { body } = renderSummaryIssue(classified, { scanDate: '2026-08-01', reckoningLine: '对账行' });
   assert.ok(!body.includes('因体量限制省略'));
+});
+
+// --- 2026-08-02 owner 决策 1a：P3 聚合 + 严重度排序 + 人话解释 ---
+
+test('renderSummaryIssue：P3 不逐条进表，只按维度报聚合数；P0/P1/P2 按严重度分节排列', () => {
+  const classified = {
+    summaryNormal: [
+      // 刻意乱序喂入：P3、P2、P1、P3 —— 输出必须 P1 节在 P2 节之前，P3 全部不成行
+      baseFinding({ severity: 'P3', fingerprint: '1111111111111111', file: 'src/big.ts', dim: 'debt-metric', category: '超长文件', evidence: '612 行', verify: 'wc -l src/big.ts' }),
+      baseFinding({ severity: 'P2', fingerprint: '2222222222222222', file: 'src/any.ts', dim: 'type-escape', category: '类型逃逸', evidence: 'as any ×3', verify: 'grep -n x' }),
+      baseFinding({ severity: 'P1', fingerprint: '3333333333333333', file: 'package.json', line: 0, dim: 'deps-vuln', category: '依赖漏洞', evidence: 'x@1 severity=high', verify: 'npm audit' }),
+      baseFinding({ severity: 'P3', fingerprint: '4444444444444444', file: 'src/untested.ts', dim: 'test-health', category: '缺失测试', evidence: '无同名 test', verify: 'ls' }),
+    ],
+    summaryLowConfidence: [],
+  };
+  const { body } = renderSummaryIssue(classified, { scanDate: '2026-08-01', reckoningLine: '对账行' });
+
+  // P3 的两条不得以表格行形式出现
+  assert.ok(!body.includes('| src/big.ts'), 'P3 finding 不应成为表格行');
+  assert.ok(!body.includes('| src/untested.ts'), 'P3 finding 不应成为表格行');
+  // 但聚合区必须如实报数，且带人话说明
+  assert.match(body, /## P3 存量指标（共 2 条，不逐条列出）/);
+  assert.match(body, /debt-metric：1 条/);
+  assert.match(body, /test-health：1 条/);
+  assert.match(body, /不随本 issue 附带/);
+
+  // 严重度分节：P1 节必须出现且在 P2 节之前；本例无 P0 则不应有 P0 节
+  const p1Idx = body.indexOf('### P1（1 条）');
+  const p2Idx = body.indexOf('### P2（1 条）');
+  assert.ok(p1Idx !== -1 && p2Idx !== -1, `应有 P1 与 P2 两个分节，实际:\n${body}`);
+  assert.ok(p1Idx < p2Idx, 'P1 节应排在 P2 节之前');
+  assert.ok(!body.includes('### P0'), '无 P0 finding 时不应出现空的 P0 节');
+
+  // P1/P2 行保留完整六列，且问题列是人话不是术语
+  assert.ok(body.includes('| package.json |'), 'line=0 的 P1 行应存在且不带 :0');
+  assert.match(body, /绕过了 TypeScript 类型检查/, 'P2 行的问题列应是人话解释');
+  assert.match(body, /已公开的安全漏洞/, 'P1 行的问题列应是人话解释');
+});
+
+test('renderSummaryIssue：只有 P3 时表格区显示空占位，聚合区仍报数', () => {
+  const classified = {
+    summaryNormal: [
+      baseFinding({ severity: 'P3', fingerprint: '5555555555555555', dim: 'debt-metric', category: '超长文件' }),
+    ],
+    summaryLowConfidence: [],
+  };
+  const { body } = renderSummaryIssue(classified, { scanDate: '2026-08-01', reckoningLine: '对账行' });
+  assert.match(body, /（本轮无 P0\/P1\/P2 级汇总项）/);
+  assert.match(body, /## P3 存量指标（共 1 条，不逐条列出）/);
+});
+
+test('renderSingleIssue：问题描述节首段是人话解释，不是裸术语', () => {
+  const finding = baseFinding({ dim: 'deps-vuln', category: '依赖漏洞', evidence: 'brace-expansion@4.0.0 severity=high' });
+  const { body } = renderSingleIssue(finding, ctx);
+  const descIdx = body.indexOf('## 问题描述');
+  const firstPara = body.slice(descIdx).split('\n')[1];
+  assert.match(firstPara, /已公开的安全漏洞/, `问题描述首段应是人话解释，实际: ${firstPara}`);
+  assert.ok(body.includes('实际: '), '原始 实际/期望 结构仍应保留');
 });
