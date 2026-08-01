@@ -17,7 +17,7 @@ import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { findFingerprintCollisions, shellQuote, formatFileLine, isDenylisted } from '../../scripts/audit/nightly-audit.mjs';
+import { findFingerprintCollisions, shellQuote, formatFileLine, isDenylisted, isTestPath } from '../../scripts/audit/nightly-audit.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CLI = join(__dirname, '..', '..', 'scripts', 'audit', 'nightly-audit.mjs');
@@ -422,6 +422,68 @@ test('secret-pattern 维度对含分号/空格的文件名生成的 verify 命�
   const probe = spawnSync('bash', ['-c', hit.verify], { cwd: repo, encoding: 'utf8' });
   assert.equal(existsSync(pwnedMarker), false, 'verify 命令本身不应触发文件名里潜藏的 shell 注入');
   assert.equal(probe.status, 0, probe.stderr);
+
+  rmSync(repo, { recursive: true, force: true });
+});
+
+test('unit：isTestPath 认出测试代码路径，不误伤同名但非测试的生产路径', () => {
+  for (const p of [
+    'src/lib/a.test.ts',
+    'src/lib/a.test.tsx',
+    'src/lib/a.spec.js',
+    'scripts/x.test.mjs',
+    'server/x.test.cjs',
+    'server/__tests__/e2e.ts',
+    'src/__mocks__/fs.ts',
+    'tests/issues/render.mjs',
+  ]) {
+    assert.equal(isTestPath(p), true, `应判为测试路径: ${p}`);
+  }
+  for (const p of [
+    // 生产源码；含 "test" 字样但既不是 .test./.spec. 后缀，也不在测试目录段下
+    'src/lib/latest.ts',
+    'src/lib/testUtils.ts',
+    'src/contest/index.ts',
+    'scripts/loops/bug-doctor/state.mjs',
+    'src/lib/a.ts',
+  ]) {
+    assert.equal(isTestPath(p), false, `不应判为测试路径: ${p}`);
+  }
+});
+
+test('secret-pattern：测试文件里的凭据命中降级为 P3(进汇总)，生产文件仍为 P1(走单发)', () => {
+  const repo = initGitRepo({
+    'package.json': JSON.stringify({ name: 'fixture', scripts: {} }),
+    // 三个文件写同一条凭据形态，只有路径不同 —— 隔离出"路径"这一个变量
+    'src/prod.ts': "const apiKey = 'sk-aaaaaaaaaaaaaaaa'\n",
+    'src/prod.test.ts': "const apiKey = 'sk-aaaaaaaaaaaaaaaa'\n",
+    'src/__tests__/helper.ts': "const apiKey = 'sk-aaaaaaaaaaaaaaaa'\n",
+  });
+
+  const r = runCli(['--_worker', 'secret-pattern', '--repo', repo]);
+  assert.equal(r.status, 0, r.stderr);
+  const parsed = JSON.parse(r.stdout);
+  assert.equal(parsed.ok, true);
+
+  const byFile = (f) => parsed.findings.find((x) => x.file === f);
+  const prod = byFile('src/prod.ts');
+  const t1 = byFile('src/prod.test.ts');
+  const t2 = byFile('src/__tests__/helper.ts');
+  assert.ok(prod && t1 && t2, '三个文件都应产出 finding（降级不等于丢弃）');
+
+  // 核心断言：severity 按路径分流，而不是一律 P1
+  assert.equal(prod.severity, 'P1', '生产文件的凭据命中必须保持 P1，才会走单发通道');
+  assert.equal(t1.severity, 'P3', '*.test.ts 里的凭据命中应降级为 P3');
+  assert.equal(t2.severity, 'P3', '__tests__/ 下的凭据命中应降级为 P3');
+
+  // 降级理由要落在 evidence 里，人看汇总时能判断这是夹具假值还是真事故
+  assert.match(t1.evidence, /测试文件，severity 由 P1 降级为 P3/);
+  assert.doesNotMatch(prod.evidence, /降级/, '生产文件不应出现降级说明');
+
+  // 指纹不受 severity 影响（种子只含 file|dim|category|anchor）——否则这次改动
+  // 会让所有历史 secret-pattern 指纹失效并重发一遍 issue
+  assert.equal(prod.fingerprint.length, 16);
+  assert.notEqual(prod.fingerprint, t1.fingerprint, '不同文件本就该是不同指纹');
 
   rmSync(repo, { recursive: true, force: true });
 });

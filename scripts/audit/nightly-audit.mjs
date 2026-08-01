@@ -565,6 +565,29 @@ function dimTypeEscape(repo) {
 
 // ---------- 维度 6: secret-pattern ----------
 
+/**
+ * 判定 repo 相对路径是否属于测试代码。
+ *
+ * 用途：secret-pattern 的凭据规则在测试文件上误报率极高——测试夹具本来就写假
+ * key/token/password。实测 mivo-canvas 首轮 17 条 P1 命中里 16 条落在
+ * `*.test.*` / `__tests__/` 下，若按 P1 走单发通道，`--send` 一开就是 16 条
+ * 噪音 issue 灌进目标仓。
+ *
+ * 处置是**降级到 P3 而非直接排除**：真把生产密钥粘进测试文件仍然是事故，
+ * 只是该由人在当日汇总里过一眼，不该独占一条 issue。
+ *
+ * severity 不参与指纹种子（种子只含 file|dim|category|anchor），故本降级不会
+ * 改变任何已有 fingerprint，不引发重复 issue。
+ */
+function isTestPath(rel) {
+  const segs = rel.split('/');
+  const base = segs[segs.length - 1] || '';
+  if (/\.(test|spec)\.[cm]?[jt]sx?$/i.test(base)) return true;
+  return segs
+    .slice(0, -1)
+    .some((s) => s === '__tests__' || s === '__mocks__' || s === 'tests');
+}
+
 function dimSecretPattern(repo) {
   const scan = walkFiles(repo, ['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs']);
   const rules = [
@@ -579,13 +602,19 @@ function dimSecretPattern(repo) {
     if (content == null) continue;
     const lines = content.split('\n');
     const rel = relFile(repo, abs);
+    const inTest = isTestPath(rel);
     for (const rule of rules) {
       for (let i = 0; i < lines.length; i++) {
         if (!rule.re.test(lines[i])) continue;
         const lineNo = i + 1;
+        // 测试文件一律压到 P3（理由见 isTestPath 的注释）。对本已是 P2 的规则
+        // (dangerouslySetInnerHTML / eval) 无路由影响，P2 与 P3 都进汇总；
+        // 真正被此规则挡住的是凭据规则的 P1 → 不再占用单发通道。
+        const severity = inTest ? 'P3' : rule.severity;
+        const testSuffix = inTest ? `（测试文件，severity 由 ${rule.severity} 降级为 P3）` : '';
         const evidence = rule.redact
-          ? `${rule.category}（值已脱敏）@L${lineNo}`
-          : `${rule.category}: ${lines[i].trim().slice(0, 120)}`;
+          ? `${rule.category}（值已脱敏）@L${lineNo}${testSuffix}`
+          : `${rule.category}: ${lines[i].trim().slice(0, 120)}${testSuffix}`;
         const normalizedLine = normalizeContent(lines[i]);
         // 锚点对实际行文本做 sha256，而不是把原文写进种子——即便是需脱敏的密钥类规则，
         // 参与锚点计算也只落一个 16 位摘要，不会把明文泄露进 fingerprint。
@@ -596,7 +625,7 @@ function dimSecretPattern(repo) {
           line: lineNo,
           category: rule.category,
           evidence,
-          severity: rule.severity,
+          severity,
           verify: `sed -n '${lineNo}p' ${shellQuote(rel)}`,
           fingerprint: fingerprint(rel, 'secret-pattern', rule.category, anchor),
         });
@@ -1618,6 +1647,7 @@ export {
   shellQuote,
   normalizeContent,
   isDenylisted,
+  isTestPath,
   formatFileLine,
   resolveRealWithMissingTail,
   isPathInsideRepo,
