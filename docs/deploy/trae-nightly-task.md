@@ -103,6 +103,7 @@ Syncthing 确实已经把 `~/AI-Agent` 同步到 mini，`Project MivoSentry` 一
 步骤 4 — 汇总回报（仅当步骤 1-3 全部成功时执行）：
   在本次自动化任务的最终输出中给出以下内容，缺一不可：
     - 步骤 1-3 每步的实际退出码
+    - 步骤 1.5 三条命令 a)b)c) 的实际输出值（成功时也要列：否则 (a) 每晚是 - 还是空就不可见，环境漂移会被藏起来）
     - 晨报绝对路径：/Users/praise/mivo-ops/mivo-sentry/reports/nightly-<TODAY>.md
     - 该文件首行对账行原文（"派 N 维度 / 成 M / 败 K / n_a J"）
     - 步骤 3 打印的"将单发 N 条 / 汇总 1 条"预览原文
