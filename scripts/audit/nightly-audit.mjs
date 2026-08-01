@@ -591,7 +591,18 @@ function isTestPath(rel) {
 function dimSecretPattern(repo) {
   const scan = walkFiles(repo, ['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs']);
   const rules = [
-    { re: /\b(api[_-]?key|secret|token|password|passwd)\s*[:=]\s*['"`][^'"`]{4,}['"`]/i, category: '疑似硬编码密钥/密码', severity: 'P1', redact: true },
+    {
+      re: /\b(api[_-]?key|secret|token|password|passwd)\s*[:=]\s*['"`][^'"`]{4,}['"`]/i,
+      category: '疑似硬编码密钥/密码',
+      severity: 'P1',
+      redact: true,
+      // 含 `${` 的命中一律不算：模板串里有插值 = 值在运行时计算，按定义不可能是
+      // 硬编码常量。实测 mivo-canvas 的 scripts/loops/bug-doctor/state.mjs:220
+      //   const token = `${process.pid}-${Date.now().toString(36)}-...`
+      // 被本规则误判为 P1，而它是生成的锁 token。不加这道判据，管道第一条真发
+      // issue 就会是误报。纯反引号字面量(无 ${)仍会被捕获，不放过真问题。
+      rejectInterpolated: true,
+    },
     { re: /dangerouslySetInnerHTML/, category: 'dangerouslySetInnerHTML 使用', severity: 'P2', redact: false },
     { re: /\beval\s*\(/, category: 'eval() 使用', severity: 'P2', redact: false },
   ];
@@ -605,7 +616,12 @@ function dimSecretPattern(repo) {
     const inTest = isTestPath(rel);
     for (const rule of rules) {
       for (let i = 0; i < lines.length; i++) {
-        if (!rule.re.test(lines[i])) continue;
+        // 用 exec 而非 test：需要拿到命中文本本身做插值判据。rule.re 未带 g 标志，
+        // 故 exec 无 lastIndex 残留问题。
+        const m = rule.re.exec(lines[i]);
+        if (!m) continue;
+        // `${` 只可能来自值那一侧（键侧是固定字面量枚举），故检查整段命中即可。
+        if (rule.rejectInterpolated && m[0].includes('${')) continue;
         const lineNo = i + 1;
         // 测试文件一律压到 P3（理由见 isTestPath 的注释）。对本已是 P2 的规则
         // (dangerouslySetInnerHTML / eval) 无路由影响，P2 与 P3 都进汇总；

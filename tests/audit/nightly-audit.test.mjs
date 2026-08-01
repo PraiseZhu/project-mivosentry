@@ -488,6 +488,50 @@ test('secret-pattern：测试文件里的凭据命中降级为 P3(进汇总)，�
   rmSync(repo, { recursive: true, force: true });
 });
 
+test('secret-pattern：含 ${} 插值的模板串不算硬编码密钥；纯字面量(含纯反引号)仍照常捕获', () => {
+  const repo = initGitRepo({
+    'package.json': JSON.stringify({ name: 'fixture', scripts: {} }),
+    // 应被放过：值在运行时计算。第 2 行取自 mivo-canvas 的真实误报现场
+    'src/gen.ts': [
+      'const token = `${process.pid}-${Date.now()}`',
+      "const token2 = `${process.pid}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`",
+      'const password = `${prefix}suffix`',
+      '',
+    ].join('\n'),
+    // 应被捕获：三种引号的纯字面量，没有插值
+    'src/hard.ts': [
+      "const apiKey = 'sk-aaaaaaaaaaaaaaaa'",
+      'const secret = "topsecretvalue"',
+      'const password = `plainbacktickvalue`',
+      '',
+    ].join('\n'),
+  });
+
+  const r = runCli(['--_worker', 'secret-pattern', '--repo', repo]);
+  assert.equal(r.status, 0, r.stderr);
+  const parsed = JSON.parse(r.stdout);
+  assert.equal(parsed.ok, true);
+
+  const creds = parsed.findings.filter((f) => f.category === '疑似硬编码密钥/密码');
+  const genHits = creds.filter((f) => f.file === 'src/gen.ts');
+  const hardHits = creds.filter((f) => f.file === 'src/hard.ts');
+
+  assert.deepEqual(
+    genHits.map((f) => f.line),
+    [],
+    `插值模板串不应产出任何凭据 finding，实际命中行: ${JSON.stringify(genHits.map((f) => f.line))}`,
+  );
+  // 纯反引号字面量（第 3 行）必须仍被捕获 —— 否则本次收窄就过头成了漏报
+  assert.deepEqual(
+    hardHits.map((f) => f.line).sort((a, b) => a - b),
+    [1, 2, 3],
+    '单引号/双引号/纯反引号三种字面量都应被捕获',
+  );
+  for (const f of hardHits) assert.equal(f.severity, 'P1');
+
+  rmSync(repo, { recursive: true, force: true });
+});
+
 // ---------- R3 修复：只读自检 fail-open（Finding #R3-1） ----------
 
 // 找真实 git 的绝对路径，供伪造的 git 包装脚本在非目标场景下透传执行。用 `which` 而非硬编码
