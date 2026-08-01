@@ -60,14 +60,23 @@ Syncthing 确实已经把 `~/AI-Agent` 同步到 mini，`Project MivoSentry` 一
 
 步骤 1.5 — 目标仓占用检查（防与 bug-doctor loop 争用，这一步不是可选的）：
   背景：审计目标 /Users/praise/mivo-ops/mivo-canvas 同时是 com.mivo.bug-doctor.patrol 这个 launchd 任务的工作目录，该任务每小时整点（:00）唤醒。它平时空转不碰工作区，但有真实 bug 记录进来时会建分支、commit、推 PR。若审计与它同时进行，G1 的只读自检（跑前后 git status --porcelain 必须一致）会把 loop 的改动误判成"审计违反了只读"并以 exit 4 退出——这是误报，不是真的只读违规，必须在开跑前避开而不是事后解释。
-  依次执行三条只读命令并记录输出：
+  依次执行三条只读命令并记录输出（三条的实际输出值都必须写进最终回报，无论放行与否）：
     a) launchctl list | awk '$3=="com.mivo.bug-doctor.patrol"{print $1}'
     b) git -C /Users/praise/mivo-ops/mivo-canvas branch --show-current
     c) git -C /Users/praise/mivo-ops/mivo-canvas status --porcelain | wc -l
-  放行判据（三项全部满足才继续）：
-    a) 输出为单个字符 - （表示 patrol 当前未在运行；若是数字则它正在跑）
-    b) 输出为 main
-    c) 输出为 0
+  放行判据：
+    b) 必须为 main —— 硬判据
+    c) 必须为 0 —— 硬判据
+    a) 只有输出为**纯数字**时才拦（数字 = patrol 进程此刻正在运行 = 确有争用）。
+       输出为 - （已加载但未运行）或**为空**，两者都放行。
+  为什么空输出不拦（这一条不要改回去）：
+    launchctl list 能看到哪些 label 取决于执行环境所处的 launchd 域。同一台 mini 上
+    实测：ssh 会话（Background 域）返回 -，而 Trae 自动化的执行环境返回空——而此时
+    patrol 明确是已加载且正常运行的（plist 在、runs=24、last exit code=0、当日
+    00:00:07 刚跑过一轮）。空输出反映的是"本执行环境看不见该域"，不是"任务不存在"。
+    若把空输出判为不放行，本夜巡在 Trae 环境下会每晚都跳过、永不执行——那不是安全网，
+    是永久阻塞。(a) 只是前置指标，(b)(c) 才是对争用的直接观测：它们看的就是工作区本身
+    的分支与脏净状态，patrol 一旦真在改仓，(b) 或 (c) 必然先变。
   不满足时的处理：不算失败，跳到"跳过报告"（见下），不得强行继续、不得为了跑通而 checkout/stash/reset 目标仓的任何状态（那会破坏 loop 的在途工作，且违反对 MivoCanvas 只读的红线）。
 
 步骤 2 — 跑 G1 夜间机械审计（对 MivoCanvas 仓只读）：
@@ -80,6 +89,7 @@ Syncthing 确实已经把 `~/AI-Agent` 同步到 mini，`Project MivoSentry` 一
   失败处理：
     - 退出码 ≠ 0 → 原样重跑同一条命令一次（仅重试 1 次）
     - 重试后仍 ≠ 0，或 (b)(c)(d) 任一不满足 → 停止本步之后的所有步骤，跳到"失败报告"，如实记录两次尝试的退出码、stderr 原文，以及 (b)(c)(d) 各项的具体观测结果（如 findings 文件是否存在、JSON.parse 是否成功、顶层实际类型）；不得声称成功、不得再重试第二次
+    - 专门针对退出码 4（只读自检失败）：仍按"失败报告"处理（产物不可信，不得当成功），但失败报告里必须附上这条诊断提示——步骤 1.5 与本步之间存在竞态窗口，patrol 可能在检查通过之后才启动并改动了目标仓。因此 exit 4 的第一嫌疑是"检查后才发生的争用"，而不是"审计真的写了目标仓"。请在报告中写明步骤 1.5 当时 (a)(b)(c) 的实际观测值，供 owner 区分这两种情形。单晚 exit 4 且步骤 1.5 当时三项正常 → 大概率是竞态，次日重跑即可；连续多晚 exit 4 才需人工深查审计脚本本身。
 
 步骤 3 — 跑 G2 issue 闸门（dry-run，不带 --send，零网络写）：
   执行：node scripts/issues/issue-gate.mjs --findings state/findings-<TODAY>.json --report reports/nightly-<TODAY>.md --repo xindong/mivo-canvas
