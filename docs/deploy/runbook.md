@@ -67,11 +67,15 @@ cd /Users/praise/mivo-ops/mivo-sentry
 node scripts/issues/issue-gate.mjs \
   --findings state/findings-<TODAY>.json \
   --repo xindong/mivo-canvas \
+  --commit "$(git -C /Users/praise/mivo-ops/mivo-canvas rev-parse HEAD)" \
   --send --token-file ~/.config/trae-secrets/mivo-issues-token
 ```
 
+**`--commit` 不能省**：契约规定 `--send` 时存在待单发 issue 但无 `--commit` → exit 2 拒发（防止 issue 环境节写成 `commit: unknown`，让接手的同事不知道审的是哪个版本）。上面用 `rev-parse HEAD` 取的是**发送时刻**目标仓的 sha——该仓 ff-only 跟随 origin/main，通常与 03:30 审计时一致；但若 03:30 之后仓被 pull 过（如早上 9:00 部署窗口前后），HEAD 已前进，此时应放弃当天真发（findings 是对旧 sha 的观测，配新 sha 会误导），等下一晚的产物再发。
+
 前置检查（跑之前）：
 - 确认 `state/findings-<TODAY>.json` 是当晚 03:30 自动任务真实产出的文件（对应当晚已经看过的 dry-run 预览），不是手动重跑生成的另一份；
+- 确认目标仓 HEAD 自 03:30 后没有前进（对比产物 mtime 与 `git -C /Users/praise/mivo-ops/mivo-canvas log -1 --format=%cI` 的提交时间可粗判；拿不准就当晚不发）；
 - 确认此刻没有另一个审计/闸门进程在跑（避免与 03:30 自动任务或其他手动操作撞上，触发指纹库并发写入）。
 
 ### 失败处理（真发模式专属，禁止套用 dry-run 的"重跑一次"规则）
