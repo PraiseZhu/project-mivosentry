@@ -45,3 +45,8 @@ coverage/
 .turbo/
 
 # === Tip: 大数据目录建议加 .nosync 后缀 ===
+
+# MivoSentry 运行产物（契约：reports/ 与 state/ 不入库，样例在 docs/examples/）
+reports/
+state/*
+!state/.gitkeep

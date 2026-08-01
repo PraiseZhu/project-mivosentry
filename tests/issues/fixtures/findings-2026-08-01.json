@@ -1,0 +1,81 @@
+[
+  {
+    "dim": "deps-vuln",
+    "file": "package.json",
+    "line": 1,
+    "category": "依赖漏洞",
+    "evidence": "lodash@4.17.15 CVE-2021-23337",
+    "severity": "P2",
+    "verify": "npm audit --json | jq '.vulnerabilities.lodash'",
+    "fingerprint": "24fd69f30d3ae6e4"
+  },
+  {
+    "dim": "type-escape",
+    "file": "src/legacy/util.ts",
+    "line": 44,
+    "category": "类型逃逸",
+    "evidence": "as any ×5",
+    "severity": "P2",
+    "verify": "grep -n 'as any' src/legacy/util.ts",
+    "fingerprint": "bc6ca50baefa77a4"
+  },
+  {
+    "dim": "secret-pattern",
+    "file": "server/lib/config.ts",
+    "line": 18,
+    "category": "疑似密钥硬编码",
+    "evidence": "const apiKey = 'sk-xxxx'",
+    "severity": "P0",
+    "verify": "grep -n \"apiKey = '\" server/lib/config.ts",
+    "fingerprint": "4af81119d7a72749"
+  },
+  {
+    "dim": "circular-dep",
+    "file": "src/store/index.ts",
+    "category": "循环依赖",
+    "evidence": "src/store/index.ts -> src/canvas/index.ts -> src/store/index.ts",
+    "severity": "P1",
+    "verify": "npx madge --circular --extensions ts,tsx src",
+    "fingerprint": "f3a5289629d79238"
+  },
+  {
+    "dim": "todo-stale",
+    "file": "src/canvas/hooks/useSelection.ts",
+    "line": 201,
+    "category": "过期TODO",
+    "evidence": "TODO(2026-02-01): 处理多选边界",
+    "severity": "P2",
+    "verify": "git blame -L 201,201 src/canvas/hooks/useSelection.ts",
+    "fingerprint": "b52d6d19082787fe"
+  },
+  {
+    "dim": "debt-metric",
+    "file": "src/app/panels/InspectorPanel.tsx",
+    "line": 1,
+    "category": "超长文件",
+    "evidence": "612 行",
+    "severity": "P2",
+    "verify": "wc -l src/app/panels/InspectorPanel.tsx",
+    "fingerprint": "84752e1bbf146697"
+  },
+  {
+    "dim": "test-health",
+    "file": "src/lib/assets/eagleClient.ts",
+    "line": 1,
+    "category": "缺失测试",
+    "evidence": "无同名 test 文件",
+    "severity": "P3",
+    "verify": "ls src/lib/assets/eagleClient.test.ts",
+    "fingerprint": "4dcace3b31a3a4c1"
+  },
+  {
+    "dim": "log-violation",
+    "file": "src/canvas/actions/exportAsset.ts",
+    "line": 77,
+    "category": "日志缺口",
+    "evidence": "失败路径未写 debugLogger",
+    "severity": "P2",
+    "verify": "grep -n debugLogger src/canvas/actions/exportAsset.ts",
+    "fingerprint": "65ff48688c056d7b"
+  }
+]

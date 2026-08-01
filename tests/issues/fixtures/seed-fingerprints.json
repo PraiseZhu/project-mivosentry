@@ -1,0 +1,16 @@
+{
+  "fingerprints": {
+    "24fd69f30d3ae6e4": {
+      "firstSeen": "2026-07-30T21:00:00.000Z",
+      "lastSeen": "2026-07-30T21:00:00.000Z",
+      "severity": "P2",
+      "dim": "deps-vuln"
+    },
+    "bc6ca50baefa77a4": {
+      "firstSeen": "2026-07-30T21:00:00.000Z",
+      "lastSeen": "2026-07-30T21:00:00.000Z",
+      "severity": "P2",
+      "dim": "type-escape"
+    }
+  }
+}
