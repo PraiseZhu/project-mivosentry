@@ -2,22 +2,31 @@
 
 > 部署方式：在 Trae 自动化面板创建一个定时任务，触发时刻设为每日 **03:30**（macmini 本地时间）。选择该时刻是为了避开 08:00 的 GitHub Actions 每日更新日志任务、09:00 的自动部署，以及 mivo loop 两班车的运行窗口。任务提示词见下方"任务提示词"代码块——具体粘贴到面板哪个配置项，以 macmini 上 Trae 实际界面为准（本文档未实测该界面，字段名称待首次部署后据实补充，不在此假设固定名称）。
 
-## 路径与环境（2026-08-01 已在 macmini 实测确认）
+## 路径与环境（2026-08-01/02 已在 macmini 实测确认）
 
-- **MivoSentry 仓在 macmini 上的绝对路径**：`/Users/praise/AI-Agent/Claude/projects/Project MivoSentry`（**经 Syncthing 从本机双向同步而来，不是独立 clone**；已实测存在。Syncthing 同步范围为 `~/About Praise`、`~/AI-Agent`、`/Volumes/AKB2/Obsidian` 三个目录）。
-- **目标审计仓（MivoCanvas）绝对路径**：`/Users/praise/mivo-ops/mivo-canvas`（bug-doctor loop 的 checkout，**不在 Syncthing 范围内**；已实测存在，`history/loops/` 已被 `.gitignore` 排除故 loop 日志不污染 porcelain）。该 checkout 以 ff-only 跟随 `origin/main`，空闲时干净，代表**已发布的 main**——这正是审计该看的东西。
-- **⚠ 不要审计 `/Users/praise/AI-Agent/Claude/projects/Project MivoCanvas`**：Syncthing 把本机的 MivoCanvas 开发工作区也同步到了 mini，它就位于 MivoSentry 旁边、路径形态相似，极易误取。但那是 owner 的在途开发工作区（随时处于任意特性分支与脏状态），审计它只会得到"owner 此刻正在改的半成品"这类噪声，且其状态每几秒就被 Syncthing 改动一次，必然触发 G1 的只读自检失败。审计目标只有上面那一个。
+- **MivoSentry 仓在 macmini 上的绝对路径**：`/Users/praise/mivo-ops/mivo-sentry`
+  —— 由 `gh repo clone PraiseZhu/project-mivosentry` 建立的**独立 clone**，刻意置于 Syncthing 同步树（`~/AI-Agent`）**之外**，机间同步只走 git。理由见下节。
+- **目标审计仓（MivoCanvas）绝对路径**：`/Users/praise/mivo-ops/mivo-canvas`（bug-doctor loop 的 checkout，同样在同步树外；`history/loops/` 已被其 `.gitignore` 排除，故 loop 日志不污染 porcelain）。该 checkout 以 ff-only 跟随 `origin/main`，空闲时干净，代表**已发布的 main**——这正是审计该看的东西。
+- **⚠ 不要审计 `/Users/praise/AI-Agent/Claude/projects/Project MivoCanvas`**：Syncthing 把 owner 本机的 MivoCanvas 开发工作区也同步到了 mini。那是在途开发工作区（随时处于任意特性分支与脏状态），审计它只会得到"owner 此刻正在改的半成品"这类噪声，且其状态被 Syncthing 持续改动，必然触发 G1 的只读自检失败。审计目标只有上面那一个。
+
+### 为什么哨兵仓走 git 而不走 Syncthing（三条独立理由）
+
+Syncthing 确实已经把 `~/AI-Agent` 同步到 mini，`Project MivoSentry` 一度也在其中。但它被显式加进两侧 `.stignore` 退出了同步，改为独立 clone：
+
+1. **投递不确定性**。`ai-agent` folder 全局 213 万文件、本机侧 30.9 万，实测长期处于 `scanning` 态（该 folder 的 `.stignore` 里记着一次"剩余扫描时间 10 天"的历史事故）。哨兵脚本与本提示词必须在每晚 03:30 前**确定性**到位——`git pull --ff-only` 能保证，Syncthing 不能。实测：一次文档改动 25 分钟后仍未到达 mini。
+2. **双通道损坏风险**。本仓 `origin` 已是 git 远端，`.git` 目录再叠一层 Syncthing 就是 owner 2026-07-28 在 review-pr 共享 skill 仓上踩过的形态（当时的结论写在 `.stignore` 里：双通道同步 `.git` 必然产生冲突文件甚至仓库损坏，此后改为只走 git）。同形问题用同一个解法。
+3. **写者隔离**。mini 侧运行会写 `state/fingerprints.json` 与 `reports/`；留在 mini 本地即无跨机写争用。若经 Syncthing 回流，两端各跑一次就会产生 `.sync-conflict-*` 并使指纹库分叉。
+
+代价：晨报只存在于 mini 上，owner 要读得 `ssh Praise-Mini` 或等效远程通道，不会自动出现在本机。这是刻意换来的隔离性。
 
 ### 硬纪律：本管道只在 macmini 上运行
 
-MivoSentry 仓经 Syncthing **双向**同步，`reports/` 与 `state/` 的产物会同步回本机。因此：
+即便已隔离，**仍不要在 owner 本机跑 `nightly-audit.mjs` 或 `issue-gate.mjs`**。理由与 Syncthing 冲突无关（已不适用），而是：两台机器各有一份独立的 `state/fingerprints.json`，本机那份不知道 mini 已经发过哪些 issue。一旦在本机带 `--send` 跑，已发过的 finding 会被当作全新的再发一遍。单写者原则：**写者只有 macmini**。
 
-- 晨报会自动出现在本机同路径下（便利）；
-- **但绝不允许在本机也跑一次 `nightly-audit.mjs` 或 `issue-gate.mjs`**。两端都写 `state/fingerprints.json` 会触发 Syncthing 冲突，生成 `.sync-conflict-*` 副本并使指纹 store 分叉——指纹去重失效，重复 issue 风暴。单写者原则：**写者只有 macmini**。
+### 环境实测差异（部署必读，两条都会让命令直接失败）
 
-### 环境实测差异（影响维度判定，非缺陷）
-
-macmini 的 `/Users/praise/mivo-ops/mivo-canvas/node_modules/.bin` 下：`madge`/`ts-prune`/`knip` **均不存在**，`vitest` 存在。故该机上 `circular-dep` 判 `n_a`（契约禁止 npx 联网拉取未锁定版本）、`dead-code` 走 tsc+grep 降级路径并在报告注明。这是契约预期行为，不是运行失败。
+1. **非交互 shell 的 PATH 不含 Homebrew**。实测 `ssh` 非交互执行时 `node` 与 `gh` 都 `command not found`（它们在 `/opt/homebrew/bin`）。bug-doctor 的 launchd plist 也是靠显式写死 `PATH` 解决的。若 Trae 自动化任务的执行环境同样是非交互 shell，所有命令前需先 `export PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin`——任务提示词的步骤 0 已包含该动作，不要删。
+2. **维度可用性**。macmini 的 `/Users/praise/mivo-ops/mivo-canvas/node_modules/.bin` 下 `madge`/`ts-prune`/`knip` **均不存在**，`vitest` 存在。故该机上 `circular-dep` 判 `n_a`（契约禁止 npx 联网拉取未锁定版本）、`dead-code` 走 tsc+grep 降级并在报告注明。这是契约预期行为，不是运行失败。
 
 ## 任务提示词
 
@@ -26,19 +35,28 @@ macmini 的 `/Users/praise/mivo-ops/mivo-canvas/node_modules/.bin` 下：`madge`
 ```
 你现在执行 MivoSentry 夜巡自动化任务。不需要任何额外上下文，按顺序执行以下步骤，每步都要显式核对成功判据后才进入下一步。全程对 MivoCanvas 仓只读，不做任何写入尝试。
 
-步骤 0 — 计算今日日期：
-  执行：date +%F
-  成功判据（两项全部满足才算成功）：
-    a) 命令退出码为 0
-    b) 输出匹配 YYYY-MM-DD 格式（四位年-两位月-两位日，如 2026-08-02）
-  记录输出为 <TODAY>（用于后续文件名）。
-  失败处理：退出码 ≠ 0，或输出格式不匹配 → 立即停止，跳到"失败报告"，写明"步骤 0 日期计算失败"及实际输出内容，不得继续后续步骤（后续步骤全部依赖 <TODAY> 拼文件名，日期算错会导致查错文件却误判为"晨报没出现"）。
+步骤 0 — 准备 PATH 并计算今日日期：
+  先执行：export PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin
+  （必须做这一步：非交互 shell 的默认 PATH 不含 Homebrew，node 与 gh 都会 command not found。若你的执行环境每条命令是独立 shell、export 不跨命令留存，则把该前缀加在下面每一条命令前。）
+  再执行：date +%F
+  成功判据（三项全部满足才算成功）：
+    a) which node 有输出（预期 /opt/homebrew/bin/node），且 node -v 能打印版本
+    b) date +%F 退出码为 0
+    c) date +%F 输出匹配 YYYY-MM-DD 格式（四位年-两位月-两位日，如 2026-08-02）
+  记录 date 的输出为 <TODAY>（用于后续文件名）。
+  失败处理：任一判据不满足 → 立即停止，跳到"失败报告"，写明是 (a)(b)(c) 哪一项失败及实际输出，不得继续后续步骤（后续步骤全部依赖 node 可用与 <TODAY> 拼文件名；日期算错会导致查错文件却误判为"晨报没出现"）。
 
-步骤 1 — 进入哨兵仓：
-  执行：cd "/Users/praise/AI-Agent/Claude/projects/Project MivoSentry"
-  成功判据：命令返回码为 0；执行 pwd，输出应为 /Users/praise/AI-Agent/Claude/projects/Project MivoSentry。
-  失败处理：路径不存在则立即停止，跳到"失败报告"，写明"哨兵仓路径不存在，需人工确认实际部署路径"，不得继续后续步骤。
-  注意：该路径含空格，凡引用它的命令一律加双引号。
+步骤 1 — 进入哨兵仓并同步到最新版本：
+  执行：cd /Users/praise/mivo-ops/mivo-sentry
+  再执行：git pull --ff-only
+  成功判据（三项全部满足才算成功）：
+    a) cd 返回码 0，且 pwd 输出为 /Users/praise/mivo-ops/mivo-sentry
+    b) git pull --ff-only 退出码为 0（输出为 "Already up to date." 也算成功）
+    c) git status --porcelain 输出为空（哨兵仓自身应无本地改动——mini 侧只运行不开发）
+  失败处理：
+    - 路径不存在 → 停止，跳到"失败报告"，写明"哨兵仓路径不存在，需人工确认实际部署路径"。
+    - git pull 非零（例如因本地有改动而无法 ff）→ 停止，跳到"失败报告"，附 git 的原始错误输出。**不得**用 git reset/checkout/stash 强行清理——mini 侧不该有本地改动，出现即说明有人在 mini 上直接改过代码，那是需要人工查清的异常，不是自动修复的对象。
+  为什么必须 pull：本仓刻意不走 Syncthing（理由见文档正文），git pull 是脚本与本提示词更新到达 mini 的**唯一**通道。跳过这步会让 mini 长期跑旧版脚本而毫无征兆。
 
 步骤 1.5 — 目标仓占用检查（防与 bug-doctor loop 争用，这一步不是可选的）：
   背景：审计目标 /Users/praise/mivo-ops/mivo-canvas 同时是 com.mivo.bug-doctor.patrol 这个 launchd 任务的工作目录，该任务每小时整点（:00）唤醒。它平时空转不碰工作区，但有真实 bug 记录进来时会建分支、commit、推 PR。若审计与它同时进行，G1 的只读自检（跑前后 git status --porcelain 必须一致）会把 loop 的改动误判成"审计违反了只读"并以 exit 4 退出——这是误报，不是真的只读违规，必须在开跑前避开而不是事后解释。
@@ -75,7 +93,7 @@ macmini 的 `/Users/praise/mivo-ops/mivo-canvas/node_modules/.bin` 下：`madge`
 步骤 4 — 汇总回报（仅当步骤 1-3 全部成功时执行）：
   在本次自动化任务的最终输出中给出以下内容，缺一不可：
     - 步骤 1-3 每步的实际退出码
-    - 晨报绝对路径：/Users/praise/AI-Agent/Claude/projects/Project MivoSentry/reports/nightly-<TODAY>.md
+    - 晨报绝对路径：/Users/praise/mivo-ops/mivo-sentry/reports/nightly-<TODAY>.md
     - 该文件首行对账行原文（"派 N 维度 / 成 M / 败 K / n_a J"）
     - 步骤 3 打印的"将单发 N 条 / 汇总 1 条"预览原文
     - 明确声明本次运行状态为"成功"

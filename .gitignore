@@ -47,6 +47,9 @@ coverage/
 # === Tip: 大数据目录建议加 .nosync 后缀 ===
 
 # MivoSentry 运行产物（契约：reports/ 与 state/ 不入库，样例在 docs/examples/）
-reports/
-state/*
-!state/.gitkeep
+# 必须用前导 / 锚定到仓库根：不带前导 / 的 `reports/` 会匹配任意深度的同名目录，
+# 曾因此把 tests/issues/fixtures/reports/ 下的测试夹具静默排除出仓库
+# —— 本机因该未跟踪文件恰好存在而全绿，干净 clone 上 4 个测试直接失败（2026-08-01 修）。
+/reports/
+/state/*
+!/state/.gitkeep
