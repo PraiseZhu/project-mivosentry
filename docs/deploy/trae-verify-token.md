@@ -10,7 +10,7 @@ GH_TOKEN=ghp_invalidinvalidinvalid gh api user --jq .login
 
 **预期：报错 `Bad credentials`。**
 
-为什么这条不能省：`gh` 在 `GH_TOKEN` 缺失或被忽略时会回退到 keyring / `hosts.yml` 里的已登录身份。若发生回退，查 1 到查 3 全都在测那个全局 PraiseZhu 身份（它对 `xindong/mivo-canvas` 是 ADMIN），三查会全绿——而你以为验的是那个受限 token。这是一条典型的假边：链路看着通，其实两端没连上。
+为什么这条不能省：`gh` 在 `GH_TOKEN` 缺失或被忽略时会回退到 keyring / `hosts.yml` 里的已登录身份。若发生回退，查 1 到查 3 全都在测那个全局 PraiseZhu 身份（它对 `xindong/mivo-canvas-plugin` 是 ADMIN），三查会全绿——而你以为验的是那个受限 token。这是一条典型的假边：链路看着通，其实两端没连上。
 
 若这条**返回了 `PraiseZhu` 而不是报错** → `gh` 忽略了 `GH_TOKEN`，立即停止，后面三查的结果一律不可采信，先查清 gh 版本与认证配置。
 
@@ -41,22 +41,22 @@ Access-Control-Expose-Headers: ETag, Link, ..., X-OAuth-Scopes, X-Accepted-OAuth
 **分两种情况判读，两者验证方式不同**：
 
 - **命令输出了非空的 `x-oauth-scopes` 行**（说明是 classic PAT）：scopes 列表里**只应含** issue 读写所需的最小权限（一般是 `repo`）。**不应出现** `admin:org`、`admin:enterprise`、`delete_repo`、`admin:public_key` 等管理类 scope——对照命令 `gh auth status`（查看当前 macmini 全局登录身份 PraiseZhu 的 scopes 清单）确认两者在管理类权限上**不重叠**。
-- **命令没有输出 `x-oauth-scopes` 行，或该行为空**（fine-grained PAT 不走旧版 OAuth scope 模型，这个响应头本身验证不了 fine-grained token 的权限范围，不是命令用错）：**本查无法自动验证**，必须由 owner 登录 GitHub → Settings → Developer settings → Fine-grained personal access tokens，手动核对该 token 的 Repository access 仅限 `xindong/mivo-canvas`、Permissions 仅勾选 Issues: Read and write，且没有多余的仓库或权限。下面查 3 的只读 list 成功只能证明"有基本读权限"，不能替代这一步的人工核对。
+- **命令没有输出 `x-oauth-scopes` 行，或该行为空**（fine-grained PAT 不走旧版 OAuth scope 模型，这个响应头本身验证不了 fine-grained token 的权限范围，不是命令用错）：**本查无法自动验证**，必须由 owner 登录 GitHub → Settings → Developer settings → Fine-grained personal access tokens，手动核对该 token 的 Repository access 仅限 `xindong/mivo-canvas-plugin`、Permissions 仅勾选 Issues: Read and write，且没有多余的仓库或权限。下面查 3 的只读 list 成功只能证明"有基本读权限"，不能替代这一步的人工核对。
 
 ## 查 3 — 目标仓可读性（issue list）
 
 ```
-GH_TOKEN=$(cat ~/.config/trae-secrets/mivo-issues-token) gh issue list -R xindong/mivo-canvas --limit 5
+GH_TOKEN=$(cat ~/.config/trae-secrets/mivo-issues-token) gh issue list -R xindong/mivo-canvas-plugin --limit 5
 ```
 
-预期：命令成功返回 issue 列表（或空列表），退出码 0。**本查只读**：不创建、不修改、不关闭任何 issue，只验证该 token 对目标仓 `xindong/mivo-canvas` 有基本读权限，为后续 `issue-gate.mjs --send` 铺路。
+预期：命令成功返回 issue 列表（或空列表），退出码 0。**本查只读**：不创建、不修改、不关闭任何 issue，只验证该 token 对目标仓 `xindong/mivo-canvas-plugin` 有基本读权限，为后续 `issue-gate.mjs --send` 铺路。
 
 ### 查 3 失败时的三路判别（别只说"停下来回查 token"）
 
 失败最常见的形态是：
 
 ```
-GraphQL: Could not resolve to a Repository with the name 'xindong/mivo-canvas'. (repository)
+GraphQL: Could not resolve to a Repository with the name 'xindong/mivo-canvas-plugin'. (repository)
 ```
 
 这条报错**不代表仓库不存在**——GitHub 对无权访问的私有仓一律回"解析不到"，不泄露存在性。所以它同时对应三种完全不同的原因，必须用下面两条只读命令分开：
@@ -66,7 +66,7 @@ GraphQL: Could not resolve to a Repository with the name 'xindong/mivo-canvas'. 
 GH_TOKEN=$(cat ~/.config/trae-secrets/mivo-issues-token) gh api repos/cli/cli --jq .full_name
 
 # 判别 B：仓库是否真的存在、名字有没有写错（故意用全局登录身份读，不带 GH_TOKEN）
-gh api repos/xindong/mivo-canvas --jq '.full_name + "  private=" + (.private|tostring)'
+gh api repos/xindong/mivo-canvas-plugin --jq '.full_name + "  private=" + (.private|tostring)'
 ```
 
 | A（公共仓） | B（全局身份读私有仓） | 结论 | 该做什么 |

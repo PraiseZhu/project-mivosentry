@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 
 import { renderSingleIssue, renderSummaryIssue } from '../../scripts/issues/render.mjs';
 
-const ctx = { repo: 'xindong/mivo-canvas', scanDate: '2026-08-01', commit: 'deadbeef' };
+const ctx = { repo: 'xindong/mivo-canvas-plugin', scanDate: '2026-08-01', commit: 'deadbeef' };
 
 function baseFinding(overrides = {}) {
   return {

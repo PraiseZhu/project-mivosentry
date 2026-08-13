@@ -77,7 +77,7 @@ node scripts/audit/nightly-audit.mjs --repo <目标仓绝对路径> \
 - `issue-gate.mjs`（CLI）：
   ```
   node scripts/issues/issue-gate.mjs --findings state/findings-<date>.json \
-    --repo xindong/mivo-canvas [--send] [--token-file ~/.config/trae-secrets/mivo-issues-token]
+    --repo xindong/mivo-canvas-plugin [--send] [--token-file ~/.config/trae-secrets/mivo-issues-token]
   ```
 - 分流规则：
   1. 指纹已 known → 跳过（计数）

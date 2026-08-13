@@ -14,7 +14,7 @@ const FIXTURES = join(__dirname, 'fixtures');
 const FINDINGS = join(FIXTURES, 'findings-2026-08-01.json');
 const SEED_STORE = join(FIXTURES, 'seed-fingerprints.json');
 const REPORT_STUB = join(FIXTURES, 'reports', 'nightly-2026-08-01.md');
-const REPO = 'xindong/mivo-canvas';
+const REPO = 'xindong/mivo-canvas-plugin';
 
 function tmpFile(name) {
   const dir = mkdtempSync(join(tmpdir(), 'mivosentry-gate-'));
@@ -46,7 +46,7 @@ function makeCapture() {
 }
 
 /** 伪造 gh 执行器：不触网，按调用序号决定成功/失败，记录每次调用的 args/env 供断言。 */
-function makeFakeExecGh({ failOn = new Set(), urlPrefix = 'https://github.com/xindong/mivo-canvas/issues/' } = {}) {
+function makeFakeExecGh({ failOn = new Set(), urlPrefix = 'https://github.com/xindong/mivo-canvas-plugin/issues/' } = {}) {
   let n = 0;
   const calls = [];
   const fn = async (args, env) => {
