@@ -2,7 +2,7 @@
 // G2 issue 闸门 CLI。
 //
 //   node scripts/issues/issue-gate.mjs --findings state/findings-<date>.json \
-//     --repo xindong/mivo-canvas [--send] [--token-file ~/.config/trae-secrets/mivo-issues-token]
+//     --repo xindong/mivo-canvas-plugin [--send] [--token-file ~/.config/trae-secrets/mivo-issues-token]
 //
 // 可选（契约未列，附加低风险扩展，缺省即等价于契约给出的最小调用形态）：
 //   --store <path>    指纹 store 路径，默认 state/fingerprints.json（相对当前工作目录）

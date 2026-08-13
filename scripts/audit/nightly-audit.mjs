@@ -569,7 +569,7 @@ function dimTypeEscape(repo) {
  * 判定 repo 相对路径是否属于测试代码。
  *
  * 用途：secret-pattern 的凭据规则在测试文件上误报率极高——测试夹具本来就写假
- * key/token/password。实测 mivo-canvas 首轮 17 条 P1 命中里 16 条落在
+ * key/token/password。实测 mivo-canvas-plugin 首轮 17 条 P1 命中里 16 条落在
  * `*.test.*` / `__tests__/` 下，若按 P1 走单发通道，`--send` 一开就是 16 条
  * 噪音 issue 灌进目标仓。
  *
@@ -597,7 +597,7 @@ function dimSecretPattern(repo) {
       severity: 'P1',
       redact: true,
       // 含 `${` 的命中一律不算：模板串里有插值 = 值在运行时计算，按定义不可能是
-      // 硬编码常量。实测 mivo-canvas 的 scripts/loops/bug-doctor/state.mjs:220
+      // 硬编码常量。实测 mivo-canvas-plugin 的 scripts/loops/bug-doctor/state.mjs:220
       //   const token = `${process.pid}-${Date.now().toString(36)}-...`
       // 被本规则误判为 P1，而它是生成的锁 token。不加这道判据，管道第一条真发
       // issue 就会是误报。纯反引号字面量(无 ${)仍会被捕获，不放过真问题。

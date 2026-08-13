@@ -8,7 +8,7 @@
 
 - **MivoSentry 仓在 macmini 上的绝对路径**：`/Users/praise/mivo-ops/mivo-sentry`
   —— 由 `gh repo clone PraiseZhu/project-mivosentry` 建立的**独立 clone**，刻意置于 Syncthing 同步树（`~/AI-Agent`）**之外**，机间同步只走 git。理由见下节。
-- **目标审计仓（MivoCanvas）绝对路径**：`/Users/praise/mivo-ops/mivo-canvas`（bug-doctor loop 的 checkout，同样在同步树外；`history/loops/` 已被其 `.gitignore` 排除，故 loop 日志不污染 porcelain）。该 checkout 以 ff-only 跟随 `origin/main`，空闲时干净，代表**已发布的 main**——这正是审计该看的东西。
+- **目标审计仓（MivoCanvas）绝对路径**：`/Users/praise/mivo-ops/mivo-canvas-plugin`（bug-doctor loop 的 checkout，同样在同步树外；`history/loops/` 已被其 `.gitignore` 排除，故 loop 日志不污染 porcelain）。该 checkout 以 ff-only 跟随 `origin/main`，空闲时干净，代表**已发布的 main**——这正是审计该看的东西。
 - **⚠ 不要审计 `/Users/praise/AI-Agent/Claude/projects/Project MivoCanvas`**：Syncthing 把 owner 本机的 MivoCanvas 开发工作区也同步到了 mini。那是在途开发工作区（随时处于任意特性分支与脏状态），审计它只会得到"owner 此刻正在改的半成品"这类噪声，且其状态被 Syncthing 持续改动，必然触发 G1 的只读自检失败。审计目标只有上面那一个。
 
 ### 为什么哨兵仓走 git 而不走 Syncthing（三条独立理由）
@@ -28,7 +28,7 @@ Syncthing 确实已经把 `~/AI-Agent` 同步到 mini，`Project MivoSentry` 一
 ### 环境实测差异（部署必读，两条都会让命令直接失败）
 
 1. **非交互 shell 的 PATH 不含 Homebrew**。实测 `ssh` 非交互执行时 `node` 与 `gh` 都 `command not found`（它们在 `/opt/homebrew/bin`）。bug-doctor 的 launchd plist 也是靠显式写死 `PATH` 解决的。若 Trae 自动化任务的执行环境同样是非交互 shell，所有命令前需先 `export PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin`——任务提示词的步骤 0 已包含该动作，不要删。
-2. **维度可用性**。macmini 的 `/Users/praise/mivo-ops/mivo-canvas/node_modules/.bin` 下 `madge`/`ts-prune`/`knip` **均不存在**，`vitest` 存在。故该机上 `circular-dep` 判 `n_a`（契约禁止 npx 联网拉取未锁定版本）、`dead-code` 走 tsc+grep 降级并在报告注明。这是契约预期行为，不是运行失败。
+2. **维度可用性**。macmini 的 `/Users/praise/mivo-ops/mivo-canvas-plugin/node_modules/.bin` 下 `madge`/`ts-prune`/`knip` **均不存在**，`vitest` 存在。故该机上 `circular-dep` 判 `n_a`（契约禁止 npx 联网拉取未锁定版本）、`dead-code` 走 tsc+grep 降级并在报告注明。这是契约预期行为，不是运行失败。
 
 ## 任务提示词
 
@@ -61,11 +61,11 @@ Syncthing 确实已经把 `~/AI-Agent` 同步到 mini，`Project MivoSentry` 一
   为什么必须 pull：本仓刻意不走 Syncthing（理由见文档正文），git pull 是脚本与本提示词更新到达 mini 的**唯一**通道。跳过这步会让 mini 长期跑旧版脚本而毫无征兆。
 
 步骤 1.5 — 目标仓占用检查（防与 bug-doctor loop 争用，这一步不是可选的）：
-  背景：审计目标 /Users/praise/mivo-ops/mivo-canvas 同时是 com.mivo.bug-doctor.patrol 这个 launchd 任务的工作目录，该任务每小时整点（:00）唤醒。它平时空转不碰工作区，但有真实 bug 记录进来时会建分支、commit、推 PR。若审计与它同时进行，G1 的只读自检（跑前后 git status --porcelain 必须一致）会把 loop 的改动误判成"审计违反了只读"并以 exit 4 退出——这是误报，不是真的只读违规，必须在开跑前避开而不是事后解释。
+  背景：审计目标 /Users/praise/mivo-ops/mivo-canvas-plugin 同时是 com.mivo.bug-doctor.patrol 这个 launchd 任务的工作目录，该任务每小时整点（:00）唤醒。它平时空转不碰工作区，但有真实 bug 记录进来时会建分支、commit、推 PR。若审计与它同时进行，G1 的只读自检（跑前后 git status --porcelain 必须一致）会把 loop 的改动误判成"审计违反了只读"并以 exit 4 退出——这是误报，不是真的只读违规，必须在开跑前避开而不是事后解释。
   依次执行三条只读命令并记录输出（三条的实际输出值都必须写进最终回报，无论放行与否）：
     a) launchctl list | awk '$3=="com.mivo.bug-doctor.patrol"{print $1}'
-    b) git -C /Users/praise/mivo-ops/mivo-canvas branch --show-current
-    c) git -C /Users/praise/mivo-ops/mivo-canvas status --porcelain | wc -l
+    b) git -C /Users/praise/mivo-ops/mivo-canvas-plugin branch --show-current
+    c) git -C /Users/praise/mivo-ops/mivo-canvas-plugin status --porcelain | wc -l
   放行判据：
     b) 必须为 main —— 硬判据
     c) 必须为 0 —— 硬判据
@@ -82,7 +82,7 @@ Syncthing 确实已经把 `~/AI-Agent` 同步到 mini，`Project MivoSentry` 一
   不满足时的处理：不算失败，跳到"跳过报告"（见下），不得强行继续、不得为了跑通而 checkout/stash/reset 目标仓的任何状态（那会破坏 loop 的在途工作，且违反对 MivoCanvas 只读的红线）。
 
 步骤 2 — 跑 G1 夜间机械审计（对 MivoCanvas 仓只读）：
-  执行：node scripts/audit/nightly-audit.mjs --repo /Users/praise/mivo-ops/mivo-canvas
+  执行：node scripts/audit/nightly-audit.mjs --repo /Users/praise/mivo-ops/mivo-canvas-plugin
   成功判据（四项全部满足才算成功）：
     a) 命令退出码为 0（该脚本约定：0=跑完，1=用法错，2=环境错——含跑前只读快照不可得，3=指纹碰撞（有诊断报告、无 findings），4=只读自检失败（产物可能已写出但不可信）。失败报告里须写明具体退出码：3 属身份冲突类、4 属只读违规类，两者处置不同不可混报）
     b) 文件 reports/nightly-<TODAY>.md 存在
@@ -94,7 +94,7 @@ Syncthing 确实已经把 `~/AI-Agent` 同步到 mini，`Project MivoSentry` 一
     - 专门针对退出码 4（只读自检失败）：仍按"失败报告"处理（产物不可信，不得当成功），但失败报告里必须附上这条诊断提示——步骤 1.5 与本步之间存在竞态窗口，patrol 可能在检查通过之后才启动并改动了目标仓。因此 exit 4 的第一嫌疑是"检查后才发生的争用"，而不是"审计真的写了目标仓"。请在报告中写明步骤 1.5 当时 (a)(b)(c) 的实际观测值，供 owner 区分这两种情形。单晚 exit 4 且步骤 1.5 当时三项正常 → 大概率是竞态，次日重跑即可；连续多晚 exit 4 才需人工深查审计脚本本身。
 
 步骤 3 — 跑 G2 issue 闸门（dry-run，不带 --send，零网络写）：
-  执行：node scripts/issues/issue-gate.mjs --findings state/findings-<TODAY>.json --report reports/nightly-<TODAY>.md --repo xindong/mivo-canvas
+  执行：node scripts/issues/issue-gate.mjs --findings state/findings-<TODAY>.json --report reports/nightly-<TODAY>.md --repo xindong/mivo-canvas-plugin
   （--report 必须显式给出：G2 不显式指定时按 findings 目录反推报告路径，一旦两类产物不在同一父目录下就会静默退化成"回退占位对账行"——e2e 演练已实测到该退化。钉死路径不靠推断。）
   成功判据（两项全部满足才算成功）：
     a) 命令退出码为 0（该脚本约定：0=完成，1=用法/findings 格式错，2=store 损坏或 token 文件缺失——本步不带 --send，正常情况不应出现退出码 2）
