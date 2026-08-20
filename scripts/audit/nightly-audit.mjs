@@ -573,11 +573,12 @@ function dimTypeEscape(repo) {
  * `*.test.*` / `__tests__/` 下，若按 P1 走单发通道，`--send` 一开就是 16 条
  * 噪音 issue 灌进目标仓。
  *
- * 处置是**降级到 P3 而非直接排除**：真把生产密钥粘进测试文件仍然是事故，
- * 只是该由人在当日汇总里过一眼，不该独占一条 issue。
+ * 凭据规则（redact:true）对测试路径是 **skip + 计数，不写入 findings**：
+ * bug-doctor 按 dim 把 secret-pattern 记成 manual-ticket，P3 降级挡不住消费侧。
+ * 危险 API 规则（eval / dangerouslySetInnerHTML）仍产出，不受这条 skip 影响。
  *
- * severity 不参与指纹种子（种子只含 file|dim|category|anchor），故本降级不会
- * 改变任何已有 fingerprint，不引发重复 issue。
+ * 真把生产密钥粘进测试文件仍然是事故，豁免计数写进该维 note，人看晨报能看见
+ * 「跳过了多少条」，不是静默丢弃。
  */
 function isTestPath(rel) {
   const segs = rel.split('/');
@@ -608,6 +609,7 @@ function dimSecretPattern(repo) {
   ];
   const findings = [];
   const occ = makeOccurrenceIndexer();
+  let skippedTestSecrets = 0;
   for (const abs of scan.files) {
     const content = readTextOrNull(abs);
     if (content == null) continue;
@@ -623,14 +625,16 @@ function dimSecretPattern(repo) {
         // `${` 只可能来自值那一侧（键侧是固定字面量枚举），故检查整段命中即可。
         if (rule.rejectInterpolated && m[0].includes('${')) continue;
         const lineNo = i + 1;
-        // 测试文件一律压到 P3（理由见 isTestPath 的注释）。对本已是 P2 的规则
-        // (dangerouslySetInnerHTML / eval) 无路由影响，P2 与 P3 都进汇总；
-        // 真正被此规则挡住的是凭据规则的 P1 → 不再占用单发通道。
-        const severity = inTest ? 'P3' : rule.severity;
-        const testSuffix = inTest ? `（测试文件，severity 由 ${rule.severity} 降级为 P3）` : '';
+        // 测试路径上的凭据规则不写 findings（消费侧会当成 manual-ticket）。
+        // 危险 API 仍产出。isTestPath / fingerprint 种子不变。
+        if (inTest && rule.redact) {
+          skippedTestSecrets += 1;
+          continue;
+        }
+        const severity = rule.severity;
         const evidence = rule.redact
-          ? `${rule.category}（值已脱敏）@L${lineNo}${testSuffix}`
-          : `${rule.category}: ${lines[i].trim().slice(0, 120)}${testSuffix}`;
+          ? `${rule.category}（值已脱敏）@L${lineNo}`
+          : `${rule.category}: ${lines[i].trim().slice(0, 120)}`;
         const normalizedLine = normalizeContent(lines[i]);
         // 锚点对实际行文本做 sha256，而不是把原文写进种子——即便是需脱敏的密钥类规则，
         // 参与锚点计算也只落一个 16 位摘要，不会把明文泄露进 fingerprint。
@@ -648,7 +652,10 @@ function dimSecretPattern(repo) {
       }
     }
   }
-  return { status: 'ok', findings, note: scanNote(scan) };
+  const skipNote = skippedTestSecrets > 0
+    ? `；测试路径凭据命中 skip ${skippedTestSecrets} 条（不写入 findings）`
+    : '';
+  return { status: 'ok', findings, note: scanNote(scan) + skipNote };
 }
 
 // ---------- 维度 7: circular-dep ----------
