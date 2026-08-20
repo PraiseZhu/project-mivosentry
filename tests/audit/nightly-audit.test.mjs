@@ -451,13 +451,13 @@ test('unit：isTestPath 认出测试代码路径，不误伤同名但非测试�
   }
 });
 
-test('secret-pattern：测试文件里的凭据命中降级为 P3(进汇总)，生产文件仍为 P1(走单发)', () => {
+test('secret-pattern：测试文件里的凭据命中不写入 findings，生产文件仍为 P1', () => {
   const repo = initGitRepo({
     'package.json': JSON.stringify({ name: 'fixture', scripts: {} }),
-    // 三个文件写同一条凭据形态，只有路径不同 —— 隔离出"路径"这一个变量
     'src/prod.ts': "const apiKey = 'sk-aaaaaaaaaaaaaaaa'\n",
     'src/prod.test.ts': "const apiKey = 'sk-aaaaaaaaaaaaaaaa'\n",
     'src/__tests__/helper.ts': "const apiKey = 'sk-aaaaaaaaaaaaaaaa'\n",
+    'src/eval.test.ts': 'eval("x")\n',
   });
 
   const r = runCli(['--_worker', 'secret-pattern', '--repo', repo]);
@@ -465,25 +465,15 @@ test('secret-pattern：测试文件里的凭据命中降级为 P3(进汇总)，�
   const parsed = JSON.parse(r.stdout);
   assert.equal(parsed.ok, true);
 
-  const byFile = (f) => parsed.findings.find((x) => x.file === f);
+  const byFile = (f) => parsed.findings.filter((x) => x.file === f);
   const prod = byFile('src/prod.ts');
-  const t1 = byFile('src/prod.test.ts');
-  const t2 = byFile('src/__tests__/helper.ts');
-  assert.ok(prod && t1 && t2, '三个文件都应产出 finding（降级不等于丢弃）');
-
-  // 核心断言：severity 按路径分流，而不是一律 P1
-  assert.equal(prod.severity, 'P1', '生产文件的凭据命中必须保持 P1，才会走单发通道');
-  assert.equal(t1.severity, 'P3', '*.test.ts 里的凭据命中应降级为 P3');
-  assert.equal(t2.severity, 'P3', '__tests__/ 下的凭据命中应降级为 P3');
-
-  // 降级理由要落在 evidence 里，人看汇总时能判断这是夹具假值还是真事故
-  assert.match(t1.evidence, /测试文件，severity 由 P1 降级为 P3/);
-  assert.doesNotMatch(prod.evidence, /降级/, '生产文件不应出现降级说明');
-
-  // 指纹不受 severity 影响（种子只含 file|dim|category|anchor）——否则这次改动
-  // 会让所有历史 secret-pattern 指纹失效并重发一遍 issue
-  assert.equal(prod.fingerprint.length, 16);
-  assert.notEqual(prod.fingerprint, t1.fingerprint, '不同文件本就该是不同指纹');
+  assert.equal(prod.length, 1, '生产文件的凭据命中必须仍写入 findings');
+  assert.equal(prod[0].severity, 'P1');
+  assert.equal(byFile('src/prod.test.ts').length, 0, '*.test.ts 凭据不得写入 findings');
+  assert.equal(byFile('src/__tests__/helper.ts').length, 0, '__tests__/ 凭据不得写入 findings');
+  assert.match(String(parsed.note), /测试路径凭据命中 skip 2 条/);
+  const evalHits = byFile('src/eval.test.ts');
+  assert.equal(evalHits.length, 1, '测试路径上的 eval 仍应产出');
 
   rmSync(repo, { recursive: true, force: true });
 });

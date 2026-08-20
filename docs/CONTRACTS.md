@@ -35,7 +35,7 @@ node scripts/audit/nightly-audit.mjs --repo <目标仓绝对路径> \
   `deps-vuln`(npm audit --json) / `dead-code`(优先目标仓 node_modules/.bin 下 ts-prune/knip，均无则用 tsc+grep 降级并在报告注明) /
   `todo-stale`(git blame TODO/FIXME 超 90 天) / `log-violation`(目标仓 `npm run verify:logging`，无此脚本则 n_a) /
   `type-escape`(grep -c `\bany\b`/`as any`/`@ts-ignore`/`@ts-expect-error`，按文件聚合) /
-  `secret-pattern`(grep 正则: key/token/password 赋值、dangerouslySetInnerHTML、eval) /
+  `secret-pattern`(grep 正则: key/token/password 赋值、dangerouslySetInnerHTML、eval；**测试路径上的凭据命中 skip+计数，不写入 findings**，危险 API 仍写) /
   `circular-dep`(**仅用目标仓本地 `node_modules/.bin/madge`**；本地二进制不存在才 n_a 并注明；**禁止 npx 联网拉取未锁定版本**) /
   `test-health`(grep `.skip(`/`.only(` + 新增 src 文件无同名/同目录 test 的清单) /
   `debt-metric`(超 300 行文件、超 80 行函数清单——只报指标不做价值判断；跨日呈现为 delta/首日基线)
