@@ -2,7 +2,7 @@
   "name": "mivosentry",
   "private": true,
   "scripts": {
-    "test:core": "node --test tests/audit/*.test.mjs tests/issues/*.test.mjs tests/anchor/*.test.mjs"
+    "test:core": "node --test tests/audit/*.test.mjs tests/issues/*.test.mjs tests/anchor/*.test.mjs tests/scheduler/runtime-paths.test.mjs"
   },
   "devDependencies": {
     "typescript": "5.9.3"

@@ -3,13 +3,14 @@ import path from 'node:path';
 import {createHash, randomUUID} from 'node:crypto';
 import {spawnSync} from 'node:child_process';
 import {pathToFileURL} from 'node:url';
+import {containedPath, isolatedGitEnv, validateRuntimePaths} from './runtime-paths.mjs';
 if(!process.env.MIVO_NIGHTLY_TASK_ROOT || !path.isAbsolute(process.env.MIVO_NIGHTLY_TASK_ROOT))throw Error('MIVO_NIGHTLY_TASK_ROOT must be an explicit absolute runtime directory');
 export const TASK=fs.realpathSync(process.env.MIVO_NIGHTLY_TASK_ROOT);
 export const SCHEDULE_ID='e6eb4be5-9aff-4c93-aa81-f05af3b86438';
 export const sha=b=>createHash('sha256').update(b).digest('hex');
 const json=p=>JSON.parse(fs.readFileSync(p,'utf8'));
 function save(p,value){const tmp=p+'.tmp-'+process.pid;fs.writeFileSync(tmp,JSON.stringify(value,null,2)+'\n',{mode:0o600});fs.renameSync(tmp,p);}
-export function fixedEnv(){return {...process.env,PATH:'/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin',TZ:'Asia/Shanghai',GIT_OPTIONAL_LOCKS:'0',npm_config_cache:path.join(TASK,'npm-cache'),TMPDIR:path.join(TASK,'install-tmp')};}
+export function fixedEnv(){return {...isolatedGitEnv(),PATH:'/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin',TZ:'Asia/Shanghai',npm_config_cache:path.join(TASK,'npm-cache'),TMPDIR:path.join(TASK,'install-tmp')};}
 function execute(command,args,options){const r=spawnSync(command,args,{encoding:'utf8',maxBuffer:64*1024*1024,...options});return {status:r.status,stdout:r.stdout||'',stderr:r.stderr||'',error:r.error?.message||null};}
 export function verifyBusiness({exit,result,receipt,health,manifest}) {
   const exits={completed:0,partial:5,blocked:6,failed:2};
@@ -28,8 +29,10 @@ export function verifyBusiness({exit,result,receipt,health,manifest}) {
 // The config is pinned per accepted release; no dirty source copying at runtime.
 export async function managedNightly(context,{run=execute,configPath=process.env.MIVO_NIGHTLY_CONFIG,dependencyStatePath=process.env.MIVO_NIGHTLY_DEPENDENCY_STATE}={}) {
   if(!configPath||!dependencyStatePath||!path.isAbsolute(configPath)||!path.isAbsolute(dependencyStatePath))throw Error('explicit absolute config and dependency state paths required');
+  containedPath(TASK,configPath);
   const config=json(configPath);
   if(config.accepted!==true)throw Error('release not independently accepted');
+  validateRuntimePaths(TASK,config,configPath,dependencyStatePath);
   const release=config.release,source=path.join(release,'source'),target=config.target;
   if(!release.startsWith(TASK+'/releases/')||target!==path.join(TASK,'plugin-runtime'))throw Error('unapproved runtime path');
   const env=fixedEnv(),state=path.join(release,'state'),out=path.join(release,'reports');

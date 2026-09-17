@@ -60,6 +60,7 @@ test('fixed PATH TZ and local cache/temp',()=>{const e=fixedEnv();assert.equal(e
 for(const failure of ['wrong-root','wrong-origin','dirty','fetch','ff-only','dependency-load','install-failed','install-timeout','missing-dependency-baseline'])test('managed sync failure stops before audit: '+failure,async t=>{
   const release=fs.mkdtempSync(path.join(TASK,'releases/test-sync-'));t.after(()=>fs.rmSync(release,{recursive:true,force:true}));
   const source=path.join(release,'source');fs.mkdirSync(source);const target=path.join(TASK,'plugin-runtime');
+  assert.equal(spawnSync('git',['init','-q','-b','main',source]).status,0);
   const config={accepted:true,release,target,revision:'a'.repeat(40),contentSha256:sha('[]')};
   const configPath=path.join(release,'config.json');fs.writeFileSync(configPath,JSON.stringify(config));fs.writeFileSync(path.join(release,'release-manifest.json'),JSON.stringify({contentSha256:sha('[]'),files:[]}));
   const dependencyStatePath=path.join(release,'dependency.json');
