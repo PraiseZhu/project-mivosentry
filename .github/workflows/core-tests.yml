@@ -1,0 +1,43 @@
+name: Core regression
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  core-tests:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      TZ: Asia/Shanghai
+      TMPDIR: ${{ github.workspace }}/state/test-tmp
+      npm_config_cache: ${{ github.workspace }}/state/npm-cache
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22.14.0'
+      - name: Prepare workspace-local temporary directory
+        run: mkdir -p "$TMPDIR"
+      - name: Install locked test dependency
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Require real TypeScript for AST regression
+        run: node -e "require('typescript')"
+      - name: Audit, G2, manifest, runner and anchor regressions
+        run: npm run test:core
+      - name: State coverage boundary
+        if: always()
+        run: |
+          printf '%s\n' \
+            'Core tests execute repository-local fixtures; no production audit or delivery is performed.' \
+            'The existing optional doctor consumer test is skipped because SENTRY_CONSUMER_MODULE belongs to another repository.' \
+            'Cindy host adapter tests require local host source/runtime and are not included. Both integrations require separate acceptance evidence.' \
+            >> "$GITHUB_STEP_SUMMARY"
+      # Host adapter requires Cindy source/runtime. The optional doctor consumer
+      # test requires SENTRY_CONSUMER_MODULE; neither is claimed as cloud coverage.
