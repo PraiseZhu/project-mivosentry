@@ -62,15 +62,16 @@
 // 这类宿主运行时产生的 untracked 但未被 .gitignore 命中的目录，只靠 --exclude-standard 挡
 // 不住，必须显式列出。
 //
-// circular-dep 维度只使用目标仓 `node_modules/.bin/madge` 本地二进制；不存在则 n_a，绝不
-// 通过 `npx --yes` 在夜巡期间联网拉取未锁定的依赖。
+// circular-dep 优先使用目标已有 cycle-guard --json；无该入口才兼容本地 madge。
+// 两者均不安装、不更新 baseline、不通过 npx 拉取依赖。
 
 import { spawn, spawnSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import { createHash, randomUUID } from 'node:crypto';
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync, rmSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { assertRepoRoot, gitEnv, gitRead, validScanDate, scanDateAt, atomicWrite, writeJson, hashFile } from './run-contract.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const SCRIPT_REPO_ROOT = path.resolve(path.dirname(__filename), '..', '..');
@@ -154,6 +155,7 @@ function runSync(cmd, args, opts = {}) {
     killSignal: 'SIGKILL',
     maxBuffer: 64 * 1024 * 1024,
     ...opts,
+    env: gitEnv(opts.env),
   });
   // 先识别 spawnSync 超时时 Node 实际会设置的 error.code === 'ETIMEDOUT'（原判定要求
   // error==null 与此矛盾：实测 Node 在 timeout 触发时会同时填充 error 与 signal，导致原判定
@@ -178,6 +180,7 @@ function runSync(cmd, args, opts = {}) {
 // 目录（不管是否已被 git 跟踪或忽略）。
 function isDenylisted(rel) {
   return (
+    rel === '.worktrees' || rel.startsWith('.worktrees/') ||
     rel === '.claude' ||
     rel.startsWith('.claude/') ||
     rel === '_tmp' ||
@@ -277,6 +280,11 @@ function dimDepsVuln(repo) {
   if (parsed.error) {
     throw new Error(`npm audit 报错: ${parsed.error.summary || JSON.stringify(parsed.error).slice(0, 300)}`);
   }
+  if (![0, 1].includes(res.status) || !parsed.vulnerabilities || Array.isArray(parsed.vulnerabilities) ||
+      typeof parsed.vulnerabilities !== 'object' || !parsed.metadata?.vulnerabilities ||
+      !Object.values(parsed.vulnerabilities).every(v => v && typeof v === 'object' && typeof v.severity === 'string')) {
+    throw new Error('npm audit 退出码或 JSON 协议不完整，不能判为零漏洞');
+  }
   const sevMap = { critical: 'P0', high: 'P1', moderate: 'P2', low: 'P3', info: 'P3' };
   const findings = [];
   for (const [name, v] of Object.entries(parsed.vulnerabilities || {})) {
@@ -329,13 +337,41 @@ function dimDeadCode(repo) {
   if (existsSync(binTsPrune) || existsSync(binKnip)) {
     const useKnip = !existsSync(binTsPrune);
     const bin = useKnip ? binKnip : binTsPrune;
-    const res = runSync(bin, [], { cwd: repo });
+    const res = runSync(bin, useKnip ? ['--reporter', 'json', '--no-exit-code'] : [], { cwd: repo });
     if (res.error) throw new Error(`${useKnip ? 'knip' : 'ts-prune'} 执行失败: ${res.error.message}`);
     if (res.timedOut) throw new Error(`${useKnip ? 'knip' : 'ts-prune'} 执行超时`);
+    if (res.status !== 0) throw new Error('dead-code 工具非零退出: ' + res.status);
+    if (useKnip) {
+      let parsed;
+      try { parsed = JSON.parse(res.stdout); } catch { throw new Error('knip JSON 解析失败'); }
+      if (!Array.isArray(parsed.files) || !Array.isArray(parsed.issues)) throw new Error('knip JSON 协议不匹配');
+      for (const file of parsed.files) {
+        if (typeof file !== 'string') throw new Error('knip files 格式错误');
+        findings.push({ dim: 'dead-code', file, line: 0, category: '疑似死代码', evidence: 'knip 未使用文件', severity: 'P3',
+          verify: 'node_modules/.bin/knip --reporter json --no-exit-code', fingerprint: fingerprint(file, 'dead-code', '疑似死代码', 'knip-file') });
+      }
+      for (const issue of parsed.issues) {
+        if (typeof issue.file !== 'string') throw new Error('knip issue 缺少 file');
+        for (const [category, items] of Object.entries(issue)) {
+          if (category === 'file') continue;
+          if (!Array.isArray(items)) throw new Error('knip issue 分类非数组: ' + category);
+          for (const item of items) {
+            const symbol = typeof item === 'string' ? item : item?.name || item?.symbol;
+            if (typeof symbol !== 'string') throw new Error('knip issue 缺少符号');
+            const anchor = category + ':' + symbol;
+            findings.push({ dim: 'dead-code', file: issue.file, line: Number.isInteger(item.line) ? item.line : 0,
+              category: '疑似死代码', evidence: 'knip ' + anchor, severity: 'P3',
+              verify: 'node_modules/.bin/knip --reporter json --no-exit-code',
+              fingerprint: fingerprint(issue.file, 'dead-code', '疑似死代码', anchor + '#' + occ(issue.file + anchor)) });
+          }
+        }
+      }
+      return { status: 'ok', findings, note: '使用 knip JSON reporter' };
+    }
     const lines = (res.stdout || '').split('\n').filter(Boolean);
     for (const line of lines) {
       const m = line.match(/^(.+?):(\d+)\s*-\s*(.+)$/);
-      if (!m) continue;
+      if (!m) throw new Error('ts-prune 输出格式不识别: ' + line.slice(0, 160));
       const [, file, lineNo, name] = m;
       const rel = path.isAbsolute(file) ? relFile(repo, file) : file;
       const exportName = name.trim();
@@ -366,7 +402,7 @@ function dimDeadCode(repo) {
   }
   note = 'ts-prune/knip 均不可用，已降级为 tsc(noUnusedLocals/noUnusedParameters)+grep 解析未使用局部变量/参数（非完整死代码检测，仅本地未用变量/参数代理指标）';
   for (const tsconfig of tsconfigs) {
-    const res = runSync(binTsc, ['-p', tsconfig, '--noEmit', '--incremental', 'false'], { cwd: repo });
+    const res = runSync(binTsc, ['-p', tsconfig, '--noEmit', '--incremental', 'false', '--noUnusedLocals', '--noUnusedParameters'], { cwd: repo });
     if (res.error) throw new Error(`tsc 降级扫描失败(${tsconfig}): ${res.error.message}`);
     if (res.timedOut) throw new Error(`tsc 降级扫描超时(${tsconfig})`);
     const out = `${res.stdout}\n${res.stderr}`;
@@ -435,9 +471,9 @@ function dimTodoStale(repo) {
       if (!/\b(TODO|FIXME)\b/.test(lines[i])) continue;
       const lineNo = i + 1;
       const blame = runSync('git', ['blame', '-L', `${lineNo},${lineNo}`, '--porcelain', '--', rel], { cwd: repo });
-      if (blame.error || blame.timedOut || blame.status !== 0) continue;
+      if (blame.error || blame.timedOut || blame.status !== 0) throw new Error('TODO blame 覆盖失败: ' + rel);
       const m = blame.stdout.match(/^author-time (\d+)/m);
-      if (!m) continue;
+      if (!m) throw new Error('TODO blame 缺 author-time: ' + rel);
       const age = daysBetween(new Date(Number(m[1]) * 1000), now);
       if (age < THRESHOLD_DAYS) continue;
       const snippet = lines[i].trim().slice(0, 160);
@@ -470,7 +506,7 @@ function dimLogViolation(repo) {
   try {
     pkg = JSON.parse(readFileSync(pkgJsonPath, 'utf8'));
   } catch {
-    return { status: 'n_a', findings: [], note: 'package.json 无法解析' };
+    throw new Error('package.json 无法解析');
   }
   if (!pkg.scripts || !pkg.scripts['verify:logging']) {
     return { status: 'n_a', findings: [], note: '目标仓无 verify:logging 脚本' };
@@ -481,6 +517,7 @@ function dimLogViolation(repo) {
   if (res.status === 0) return { status: 'ok', findings: [] };
 
   const combined = `${res.stdout}\n${res.stderr}`;
+  if (res.status !== 1 || /Error:|MODULE_NOT_FOUND|command not found/.test(combined)) throw new Error("verify:logging 工具执行失败: " + res.status);
   const findings = [];
   const re = /([./][\w./-]+\.[jt]sx?):(\d+)/g;
   const seen = new Set();
@@ -506,17 +543,7 @@ function dimLogViolation(repo) {
     });
   }
   if (findings.length === 0) {
-    const evidence = `verify:logging 退出码 ${res.status}: ${combined.trim().slice(0, 300)}`;
-    findings.push({
-      dim: 'log-violation',
-      file: 'package.json',
-      line: 0,
-      category: '日志规范违反',
-      evidence,
-      severity: 'P2',
-      verify: 'npm run verify:logging',
-      fingerprint: fingerprint('package.json', 'log-violation', '日志规范违反', 'log-violation-unparsed'),
-    });
+    throw new Error("verify:logging 非零但无可识别违规结果，覆盖失败");
   }
   return { status: 'ok', findings };
 }
@@ -538,7 +565,7 @@ function dimTypeEscape(repo) {
     const counts = {};
     let total = 0;
     for (const { re, label } of patterns) {
-      const matches = content.match(re);
+      const matches = (label === 'any' ? content.replace(/\bas\s+any\b/g, '') : content).match(re);
       if (matches && matches.length) {
         counts[label] = matches.length;
         total += matches.length;
@@ -661,6 +688,32 @@ function dimSecretPattern(repo) {
 // ---------- 维度 7: circular-dep ----------
 
 function dimCircularDep(repo) {
+  const guard = path.join(repo, 'scripts', 'ci', 'cycle-guard.mjs');
+  if (existsSync(guard)) {
+    // Reviewed target entrypoint: --json only reads; never pass --update-baseline.
+    const res = runSync(process.execPath, [guard, '--json'], { cwd: repo });
+    if (res.error || res.timedOut || ![0, 1].includes(res.status)) throw new Error('cycle-guard 执行失败: ' + (res.error?.message || res.status));
+    let parsed;
+    try { parsed = JSON.parse(res.stdout); } catch { throw new Error('cycle-guard JSON 解析失败'); }
+    const ring = nodes => Array.isArray(nodes) && nodes.length > 0 && nodes.every(n => typeof n === 'string' && n.length > 0);
+    if (!Number.isInteger(parsed.allCycleCount) || parsed.allCycleCount < 0 ||
+        !Number.isInteger(parsed.valueCycleCount) || parsed.valueCycleCount < 0 ||
+        !Array.isArray(parsed.valueCycles) || !parsed.valueCycles.every(ring) ||
+        !Array.isArray(parsed.whitelistedCycles) || !parsed.whitelistedCycles.every(c => ring(c.nodes) && ['accepted', 'baseline'].includes(c.kind)) ||
+        !Array.isArray(parsed.nonWhitelistedCycles) || !parsed.nonWhitelistedCycles.every(ring) ||
+        !Array.isArray(parsed.staleWhitelistEntries) ||
+        parsed.valueCycleCount !== parsed.valueCycles.length ||
+        parsed.valueCycleCount !== parsed.whitelistedCycles.length + parsed.nonWhitelistedCycles.length ||
+        res.status !== (parsed.nonWhitelistedCycles.length ? 1 : 0)) throw new Error('cycle-guard JSON/退出码不一致');
+    const findings = parsed.nonWhitelistedCycles.map(nodes => {
+      const sorted = [...new Set(nodes)].sort();
+      return { dim: 'circular-dep', file: sorted[0], line: 0, category: '循环依赖', severity: 'P2',
+        evidence: '未豁免新增值级环: ' + sorted.join(' > '), verify: 'node scripts/ci/cycle-guard.mjs --json',
+        fingerprint: fingerprint(sorted[0], 'circular-dep', '循环依赖', sorted.join('>')) };
+    });
+    return { status: 'ok', findings, note: 'cycle-guard: 全边环 ' + parsed.allCycleCount + ' / 值级环 ' + parsed.valueCycleCount +
+      ' / 已豁免 ' + parsed.whitelistedCycles.length + ' / 未豁免新增 ' + findings.length + '；已豁免不等于安全或无环' };
+  }
   const srcDir = path.join(repo, 'src');
   if (!existsSync(srcDir)) return { status: 'n_a', findings: [], note: '目标仓无 src 目录' };
   const madgeBin = path.join(repo, 'node_modules', '.bin', 'madge');
@@ -767,7 +820,8 @@ function dimTestHealth(repo) {
   const srcDir = path.join(repo, 'src');
   if (existsSync(srcDir)) {
     const res = runSync('git', ['log', `--since=${NEW_FILE_WINDOW_DAYS}.days`, '--diff-filter=A', '--name-only', '--format=', '--', 'src'], { cwd: repo });
-    if (!res.error && !res.timedOut && res.status === 0) {
+    if (res.error || res.timedOut || res.status !== 0) throw new Error('test-health Git 历史不可读，新增文件覆盖失败');
+    {
       const added = [...new Set(res.stdout.split('\n').map((l) => l.trim()).filter(Boolean))];
       for (const relAdded of added) {
         if (!/\.(ts|tsx|js|jsx)$/.test(relAdded)) continue;
@@ -823,6 +877,7 @@ function loadTargetTypescript(repo) {
 function findLongFunctionsTs(ts, sourceText, fileName, threshold) {
   const scriptKind = fileName.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS;
   const sf = ts.createSourceFile(fileName, sourceText, ts.ScriptTarget.Latest, true, scriptKind);
+  if (sf.parseDiagnostics?.length) throw new Error('TypeScript AST 解析失败');
   const results = [];
   function visit(node) {
     const isFnLike =
@@ -895,6 +950,7 @@ function dimDebtMetric(repo) {
 
   const ts = loadTargetTypescript(repo);
   let tsNote;
+  let failedFiles = 0;
   if (!ts) {
     tsNote = '目标仓 node_modules 无 typescript，函数超长检测已跳过，仅报告文件超长指标';
   } else {
@@ -906,6 +962,7 @@ function dimDebtMetric(repo) {
       try {
         longFns = findLongFunctionsTs(ts, content, abs, FUNC_LINE_THRESHOLD);
       } catch {
+        failedFiles += 1;
         continue; // 单文件 AST 解析失败不阻断整维度
       }
       for (const fn of longFns) {
@@ -929,7 +986,7 @@ function dimDebtMetric(repo) {
     }
   }
   const note = tsNote ? `${scanNote(scan)} | ${tsNote}` : scanNote(scan);
-  return { status: 'ok', findings, note };
+  return { status: (!ts || failedFiles) ? 'partial' : 'ok', findings, note: note + (failedFiles ? ' | AST 失败文件: ' + failedFiles : '') };
 }
 
 // ---------- 维度分发表 ----------
@@ -1036,7 +1093,7 @@ function spawnDimension(dim, repo) {
         });
         return;
       }
-      if (!parsed.ok) {
+      if (code !== 0 || !parsed.ok || !['ok', 'n_a', 'partial'].includes(parsed.status) || !Array.isArray(parsed.findings)) {
         resolve({ dim, bucket: 'error', durationMs, note: parsed.error || '未知错误', findings: [] });
         return;
       }
@@ -1044,7 +1101,7 @@ function spawnDimension(dim, repo) {
         resolve({ dim, bucket: 'n_a', durationMs, note: parsed.note || '', findings: [] });
         return;
       }
-      resolve({ dim, bucket: 'ok', durationMs, note: parsed.note || '', findings: parsed.findings || [] });
+      resolve({ dim, bucket: parsed.status === 'partial' ? 'error' : 'ok', durationMs, note: parsed.note || '', findings: parsed.findings || [] });
     });
   });
 }
@@ -1327,6 +1384,13 @@ function renderReport({ date, repo, results, allFindings, readOnlyLine, findings
 // ---------- orchestrator ----------
 
 async function runOrchestrator(args) {
+  process.env.TZ = 'Asia/Shanghai';
+  const date = args['scan-date'] ?? scanDateAt();
+  const runId = args['run-id'] ?? randomUUID();
+  if (!validScanDate(date) || typeof runId !== 'string' || !/^[a-zA-Z0-9_-]{1,100}$/.test(runId)) {
+    process.stderr.write('用法错误: --scan-date 或 --run-id 无效\n');
+    process.exit(1);
+  }
   const repoArg = args.repo;
   if (typeof repoArg !== 'string' || !repoArg) {
     process.stderr.write('用法错误: 必须提供 --repo <目标仓绝对路径>\n');
@@ -1337,13 +1401,12 @@ async function runOrchestrator(args) {
     process.stderr.write(`环境错误: --repo 路径不存在: ${repoAbs}\n`);
     process.exit(2);
   }
-  const gitCheck = runSync('git', ['-C', repoAbs, 'rev-parse', '--is-inside-work-tree']);
-  if (gitCheck.error || gitCheck.status !== 0 || gitCheck.stdout.trim() !== 'true') {
-    process.stderr.write(`环境错误: --repo 不是 git 仓: ${repoAbs}\n`);
+  let repoReal;
+  try { repoReal = assertRepoRoot(repoAbs); }
+  catch (err) {
+    process.stderr.write('环境错误: ' + err.message + '\n');
     process.exit(2);
   }
-  const repoReal = realpathSync(repoAbs);
-
   let requestedDims;
   if (typeof args.dims === 'string' && args.dims.trim()) {
     requestedDims = args.dims.split(',').map((s) => s.trim()).filter(Boolean);
@@ -1388,23 +1451,31 @@ async function runOrchestrator(args) {
     process.exit(1);
   }
 
-  // Finding #1：pre 快照必须在任何 mkdir/写入之前拍下——否则一旦 out/state 目录意外落在
-  // repo 内，mkdir 造成的新增内容会在"跑前"快照里就已经存在，自检永远看不出问题。
-  //
-  // R3 修复(Finding #R3-1)：pre 快照必须是"真取到的"才算数——只比较 stdout 会把"git 本身
-  // 跑失败(非零退出/超时/spawn 错误)"和"repo 确实没有变化"混为一谈(两者常常都是空 stdout，
-  // 会被误判为一致)。pre 拿不到快照时，这一轮的只读判断从起点就不可信，必须在任何 mkdir 之
-  // 前直接终止(环境错误)，不能带着不可信的基线继续跑、更不能让它在 post 也拿不到时凭空拼出
-  // 一个"PASS"。
+  // Output roots have passed the target-write guard. Invalidate old publication first;
+  // a missing pre-snapshot must never leave an earlier run appearing current.
+  mkdirSync(stateDir, { recursive: true });
+  const lock = path.join(stateDir, '.audit.lock');
+  try { mkdirSync(lock); } catch {
+    process.stderr.write('环境错误: 审计输出已有写者或遗留锁，拒绝覆盖\n');
+    process.exit(2);
+  }
+  process.on('exit', () => rmSync(lock, { recursive: true, force: true }));
+  const manifestPath = path.join(stateDir, 'manifest-' + date + '.json');
+  const manifestBase = { schemaVersion: 1, runId, scanDate: date, repo: repoReal, valid: false, status: 'failed', dimensions: [], artifacts: {} };
+  // Invalidate an earlier same-day result before any work. A failed new run cannot masquerade as the old run.
+  if (existsSync(manifestPath)) writeJson(manifestPath, { ...manifestBase, reason: 'running' });
   const preStatus = runSync('git', ['-C', repoAbs, 'status', '--porcelain']);
   if (!isValidGitStatusSnapshot(preStatus)) {
     process.stderr.write(
       `环境错误: 只读自检跑前 git status 快照拿不到(error=${preStatus.error ? preStatus.error.message : 'null'}, ` +
-        `timedOut=${preStatus.timedOut}, status=${preStatus.status})，"拿不到快照"不等于"没有变化"，在任何写入前终止\n`
+        `timedOut=${preStatus.timedOut}, status=${preStatus.status})，"拿不到快照"不等于"没有变化"，不发布有效产物\n`
     );
     process.exit(2);
   }
   const preStatusOut = preStatus.stdout;
+  const commit = gitRead(repoReal, ['rev-parse', 'HEAD']).trim();
+  manifestBase.commit = commit;
+  writeJson(manifestPath, { ...manifestBase, reason: 'running' });
 
   mkdirSync(outDir, { recursive: true });
   mkdirSync(stateDir, { recursive: true });
@@ -1421,111 +1492,68 @@ async function runOrchestrator(args) {
     for (const f of r.findings) allFindings.push(f);
   }
 
-  const now = new Date();
-  const date = todayStr(now);
-  const yesterdayDate = todayStr(addDays(now, -1));
-  const findingsPath = path.join(stateDir, `findings-${date}.json`);
-  const reportPath = path.join(outDir, `nightly-${date}.md`);
-  const yesterdayFindingsPath = path.join(stateDir, `findings-${yesterdayDate}.json`);
+  const yesterdayDate = new Date(Date.parse(date) - 86_400_000).toISOString().slice(0, 10);
+  const findingsPath = path.join(stateDir, 'findings-' + date + '.json');
+  const reportPath = path.join(outDir, 'nightly-' + date + '.md');
+  const yesterdayFindingsPath = path.join(stateDir, 'findings-' + yesterdayDate + '.json');
   let yesterdayFindings = null;
   if (existsSync(yesterdayFindingsPath)) {
     try {
       const parsed = JSON.parse(readFileSync(yesterdayFindingsPath, 'utf8'));
       yesterdayFindings = Array.isArray(parsed) ? parsed : null;
-    } catch {
-      yesterdayFindings = null;
-    }
+    } catch { /* optional previous-day baseline; explicitly rendered as unavailable */ }
   }
-
-  // Finding #2/#3：产物写出前强制 fingerprint 唯一性断言。碰撞即判定为本工具自身 bug，
-  // 不写 findings.json，不静默把不可信的去重身份交给 G2。
+  const dimensions = results.map(({ dim, bucket, note }) => ({ dim, bucket, note }));
   const collisions = findFingerprintCollisions(allFindings);
-  if (collisions.length > 0) {
-    const provisional = renderReport({
-      date,
-      repo: repoAbs,
-      results,
-      allFindings,
-      readOnlyLine: 'pending（写入后复检中，若看到这行说明复检未覆盖本文件，请重跑）',
-      findingsPath,
-      yesterdayFindings,
-      yesterdayDate,
-      collisions,
-    });
-    writeFileSync(reportPath, provisional, 'utf8');
-    const postStatusCol = runSync('git', ['-C', repoAbs, 'status', '--porcelain']);
-    const finalCol = renderReport({
-      date,
-      repo: repoAbs,
-      results,
-      allFindings,
-      readOnlyLine: buildReadOnlyLine({ preStatusOut, postStatus: postStatusCol }),
-      findingsPath,
-      yesterdayFindings,
-      yesterdayDate,
-      collisions,
-    });
-    writeFileSync(reportPath, finalCol, 'utf8');
-
-    process.stderr.write(`致命错误: 检测到 ${collisions.length} 组 fingerprint 碰撞，判定为身份种子生成逻辑 bug，不写 ${findingsPath}\n`);
-    for (const c of collisions) {
-      process.stderr.write(`  fp=${c.fingerprint}: ${c.first.dim}/${c.first.file}:${c.first.line} <-> ${c.duplicate.dim}/${c.duplicate.file}:${c.duplicate.line}\n`);
-    }
-    process.stdout.write(`报告(含碰撞诊断): ${reportPath}\n`);
+  const reportArgs = { date, repo: repoReal, results, allFindings, findingsPath, yesterdayFindings, yesterdayDate, collisions };
+  if (collisions.length) {
+    atomicWrite(reportPath, renderReport({ ...reportArgs, readOnlyLine: 'FAIL: 指纹碰撞，产物不可信' }));
+    writeJson(manifestPath, { ...manifestBase, dimensions, reason: 'fingerprint-collision' });
+    process.stderr.write('致命错误: fingerprint 碰撞，不发布 findings\n');
     process.exit(3);
   }
 
-  writeFileSync(findingsPath, `${JSON.stringify(allFindings, null, 2)}\n`, 'utf8');
-
-  // Finding #1：先用占位自检文案写一次报告——真实自检结果必须来自"写完全部产物后"的
-  // post 快照，两阶段写入镜像 scripts/anchor/anchor-map.mjs 已验证过的模式。
-  const provisionalReport = renderReport({
-    date,
-    repo: repoAbs,
-    results,
-    allFindings,
-    readOnlyLine: 'pending（写入后复检中，若看到这行说明复检未覆盖本文件，请重跑）',
-    findingsPath,
-    yesterdayFindings,
-    yesterdayDate,
-    collisions: null,
-  });
-  writeFileSync(reportPath, provisionalReport, 'utf8');
-
-  // post 快照必须在全部产物（findings.json + 本报告首次写入）写完之后。
-  const postStatus = runSync('git', ['-C', repoAbs, 'status', '--porcelain']);
-  const { ok: readOnlyOk, postValid: postSnapshotValid } = evaluateReadOnly(preStatusOut, postStatus);
-
-  const finalReport = renderReport({
-    date,
-    repo: repoAbs,
-    results,
-    allFindings,
-    readOnlyLine: buildReadOnlyLine({ preStatusOut, postStatus }),
-    findingsPath,
-    yesterdayFindings,
-    yesterdayDate,
-    collisions: null,
-  });
-  writeFileSync(reportPath, finalReport, 'utf8');
-
-  const succeeded = results.filter((r) => r.bucket === 'ok').length;
-  const failed = results.filter((r) => r.bucket === 'error').length;
-  const na = results.filter((r) => r.bucket === 'n_a').length;
-  process.stdout.write(`派 ${results.length} 维度 / 成 ${succeeded} / 败 ${failed} / n_a ${na}\n`);
-  process.stdout.write(`报告: ${reportPath}\n`);
-  process.stdout.write(`findings: ${findingsPath}\n`);
-  process.stdout.write(`只读自检: ${readOnlyOk ? 'PASS' : postSnapshotValid ? 'FAIL' : 'FAIL-快照不可得'}\n`);
-
-  // Finding #1：目标仓状态在本轮运行期间发生变化——或跑后快照本身拿不到、判不出"到底有没有
-  // 变化"——都必须显式失败，不能 exit 0。"拿不到快照"不是"没有变化"的证据（R3 修复）。
+  // Immutable per-run files; the daily manifest is the last, atomic publication pointer.
+  function runDir(root) {
+    const parent = path.join(root, 'runs');
+    const resolved = resolveRealWithMissingTail(parent);
+    const realRoot = realpathSync(root);
+    if (!resolved.startsWith(realRoot + path.sep)) throw new Error('产物 runs 目录越界');
+    mkdirSync(parent, { recursive: true });
+    const dir = path.join(parent, runId + '-' + randomUUID());
+    mkdirSync(dir); // EEXIST rejects accidental runId reuse instead of overwriting another run.
+    return dir;
+  }
+  const publishedFindings = path.join(runDir(stateDir), 'findings-' + date + '.json');
+  const publishedReport = path.join(runDir(outDir), 'nightly-' + date + '.md');
+  writeJson(publishedFindings, allFindings);
+  atomicWrite(publishedReport, renderReport({ ...reportArgs, readOnlyLine: 'pending（尚未发布）' }));
+  const postStatus = runSync('git', ['-C', repoReal, 'status', '--porcelain']);
+  let postCommit = null;
+  try { postCommit = gitRead(repoReal, ['rev-parse', 'HEAD']).trim(); } catch { /* fail closed */ }
+  const readOnlyOk = evaluateReadOnly(preStatusOut, postStatus).ok && postCommit === commit;
+  const readOnlyLine = readOnlyOk ? '**PASS**（HEAD + status 一致）' : '**FAIL**（HEAD/status 变化或快照不可得，可能为并发写者）';
+  const finalReport = renderReport({ ...reportArgs, readOnlyLine });
+  atomicWrite(publishedReport, finalReport);
+  atomicWrite(reportPath, finalReport);
   if (!readOnlyOk) {
-    process.stderr.write(
-      `致命错误: 目标仓 git status 在运行前后发生变化或跑后快照不可得，判定为只读契约被破坏\n跑前:\n${preStatusOut}\n` +
-        `跑后(原始 stdout，若快照不可得则不代表 repo 真实状态):\n${postStatus.stdout}\n`
-    );
+    writeJson(manifestPath, { ...manifestBase, dimensions, reason: 'read-only-or-head-changed' });
+    process.stderr.write('只读自检失败: HEAD/status 变化或快照不可得；检查后争用是首要排查项\n');
     process.exit(4);
   }
+  // Daily array/report aliases retain compatibility, but are never validity evidence themselves.
+  atomicWrite(findingsPath, readFileSync(publishedFindings, 'utf8'));
+  const status = dimensions.every(d => d.bucket === 'ok') ? 'completed' : 'partial';
+  writeJson(manifestPath, {
+    ...manifestBase, valid: true, status, dimensions,
+    artifacts: {
+      findings: { path: path.relative(stateDir, publishedFindings), sha256: hashFile(publishedFindings) },
+      report: { path: path.relative(stateDir, publishedReport), sha256: hashFile(publishedReport) },
+    },
+  });
+  process.stdout.write(finalReport.split('\n')[0] + '\n');
+  process.stdout.write('报告: ' + reportPath + '\nfindings: ' + findingsPath + '\nmanifest: ' + manifestPath + '\n');
+  process.stdout.write('只读自检: PASS\n业务状态: ' + status + '\n');
   process.exit(0);
 }
 

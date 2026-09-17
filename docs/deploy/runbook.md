@@ -1,6 +1,29 @@
 # MivoSentry Runbook
 
+## 当前恢复入口（2026-09-17，尚未激活）
+
+当前任务保留每日 **02:30 / Asia/Shanghai**；下方 03:30、旧部署路径与手动链路为历史说明，不应直接复制为新调度配置。新入口与 manifest/最终 receipt 校验见 [接口契约](../CONTRACTS.md#确定性夜巡入口与发布契约2026-09-17)。
+
+使用固定版本的独立 release，不长期指向开发工作树。候选源码可来自未合并修复，但必须记录 tested revision、内容 hash 与 upstream 基线，不冒充 main。runner 自同步要求独立 Git 根和冻结本地 origin；每次更新 release 另行验收。
+
+调度入口先在隔离目标内 ff-only 同步 main，仅锁文件或依赖基线变化时按锁安装，再进入只读审计。同步失败立即停止，不审旧版本充成功。runner 调用为：
+
+```sh
+scripts/audit/nightly-runner.sh --repo <独立目标仓绝对路径> \
+  --issue-repo xindong/mivo-canvas-plugin --state-dir <release状态绝对路径> --out-dir <release报告绝对路径>
+```
+
+只认真实退出码及同轮 receipt/manifest/hash；partial、blocked、failed 均不得给宿主报成功。当前宿主拒绝 script + silentWhenIdle=true，通知策略待用户决定，尚未修改 live schedule。回滚应恢复原任务 executionMode/workingDir/scriptConfig，保留现场回执，不通过改 JSON 假装修复。
+
 ## 链路图
+
+### 受管 adapter 的版本归属
+
+入口源码为 scripts/scheduler/nightly-script.mjs、scripts/scheduler/managed-nightly.mjs；回归为 tests/scheduler/adapter.test.mjs 与 protocol-child.mjs。部署时从已验提交生成固定副本，不长期执行开发工作树或仅存 state 的无版本脚本。
+
+启动命令必须显式传入三个绝对路径环境变量：MIVO_NIGHTLY_TASK_ROOT（已批准运行根）、MIVO_NIGHTLY_CONFIG（release pin 配置）、MIVO_NIGHTLY_DEPENDENCY_STATE（依赖安装账本）。宿主过滤继承的自定义环境变量，因此须放在 script command 的环境赋值前缀中，不能只依赖启动 Cindy 时的环境。配置、依赖账本、cache、临时文件与回执均留运行目录，不入源码仓。归仓不会自动切换现有候选或 live schedule。
+
+回归命令为 node --test tests/scheduler/adapter.test.mjs；除上述三项外显式提供 CINDY_SOURCE_ROOT（实际宿主源码仓），TMPDIR 指向任务内临时目录。测试使用运行根内隔离依赖的 TypeScript 加载真实宿主，只模拟业务结果与同步命令，不执行 G1 或外发。
 
 自动化链路（03:30，永久 dry-run，见 `trae-nightly-task.md`；**下面这条链路永远不带 `--send`，任何情况下都不改**）：
 

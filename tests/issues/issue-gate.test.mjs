@@ -1,12 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, copyFileSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, copyFileSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { run } from '../../scripts/issues/issue-gate.mjs';
+import { run as runGate } from '../../scripts/issues/issue-gate.mjs';
+import { hashFile, NIGHTLY_DIMENSIONS } from '../../scripts/audit/run-contract.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CLI = join(__dirname, '..', '..', 'scripts', 'issues', 'issue-gate.mjs');
@@ -15,6 +16,47 @@ const FINDINGS = join(FIXTURES, 'findings-2026-08-01.json');
 const SEED_STORE = join(FIXTURES, 'seed-fingerprints.json');
 const REPORT_STUB = join(FIXTURES, 'reports', 'nightly-2026-08-01.md');
 const REPO = 'xindong/mivo-canvas-plugin';
+
+// Existing rendering/store tests explicitly exercise historical preview compatibility.
+// Sending tests use an actual isolated Git identity and hash-bound publication, never a bypass.
+async function run(argv, opts) {
+  if (!argv.includes('--send')) return runGate([...argv, '--legacy-preview'], opts);
+  const dir = mkdtempSync(join(tmpdir(), 'mivosentry-gate-manifest-'));
+  const repo = join(dir, 'repo');
+  mkdirSync(repo);
+  const git = args => {
+    const r = spawnSync('git', ['-C', repo, ...args], { encoding: 'utf8' });
+    assert.equal(r.status, 0, r.stderr);
+    return r.stdout.trim();
+  };
+  git(['init', '-q']);
+  git(['-c', 'user.name=fixture', '-c', 'user.email=fixture@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '--allow-empty', '-qm', 'fixture']);
+  const commit = git(['rev-parse', 'HEAD']);
+  const state = join(dir, 'state');
+  const reports = join(dir, 'reports');
+  mkdirSync(state); mkdirSync(reports);
+  const findings = join(state, 'findings-2026-08-01.json');
+  const report = join(reports, 'nightly-2026-08-01.md');
+  copyFileSync(argv[argv.indexOf('--findings') + 1], findings);
+  writeFileSync(report, '派 9 维度 / 成 7 / 败 1 / n_a 1\n');
+  const manifest = join(state, 'manifest-2026-08-01.json');
+  writeFileSync(manifest, JSON.stringify({ schemaVersion: 1, runId: 'fixture', scanDate: '2026-08-01', repo, commit,
+    valid: true, status: 'partial', dimensions: NIGHTLY_DIMENSIONS.map((dim, i) => ({ dim, bucket: i < 7 ? 'ok' : i === 7 ? 'error' : 'n_a', note: 'fixture' })),
+    artifacts: { findings: { path: 'findings-2026-08-01.json', sha256: hashFile(findings) },
+      report: { path: '../reports/nightly-2026-08-01.md', sha256: hashFile(report) } } }));
+  const receipt = join(state, 'receipt.json');
+  writeFileSync(receipt, JSON.stringify({ schemaVersion: 1, runId: 'fixture', scanDate: '2026-08-01', repo, commit,
+    manifest, status: 'partial', steps: [{ name: 'g1', exitCode: 0 }] }));
+  const args = [...argv];
+  for (const [key, value] of [['--findings', findings], ['--report', report], ['--commit', commit]]) {
+    const i = args.indexOf(key);
+    if (i >= 0) args[i + 1] = value;
+    else args.push(key, value);
+  }
+  return runGate([...args, '--manifest', manifest, '--scan-date', '2026-08-01', '--run-id', 'fixture',
+    '--producer-receipt', receipt,
+    '--target-repo', repo, '--state-dir', state, '--out-dir', reports], opts);
+}
 
 function tmpFile(name) {
   const dir = mkdtempSync(join(tmpdir(), 'mivosentry-gate-'));
@@ -461,35 +503,20 @@ test('全部单发均失败：成功数 0 也是部分失败的极端，同样 e
 });
 
 // --- P1#7 回归：--send 时若必需的对账信息缺失，fail-closed 拒绝发送 ---
-test('--send 但存在待单发内容却未提供 --commit：exit 2，fail-closed，从不触网（P1#7 回归）', async () => {
-  const storePath = tmpFile('fingerprints.json');
-  const tokenFile = tmpFile('token');
-  writeFileSync(tokenFile, 'ghp_faketoken\n', 'utf8');
-  const execGh = makeFakeExecGh();
+test('--send 缺可信 manifest 时拒绝，不能沿用历史 commit/report 放行', async () => {
   const cap = makeCapture();
-
-  const code = await run(
-    ['--findings', FINDINGS, '--repo', REPO, '--store', storePath, '--send', '--token-file', tokenFile, '--report', REPORT_STUB],
-    { ...cap.opts, execGh },
-  );
-  assert.equal(code, 2);
-  assert.match(cap.stderr, /\[对账信息缺失\]/);
+  const execGh = makeFakeExecGh();
+  const code = await runGate(['--findings', FINDINGS, '--repo', REPO, '--send', '--commit', 'deadbeef', '--report', REPORT_STUB], { ...cap.opts, execGh });
+  assert.equal(code, 1);
+  assert.match(cap.stderr, /产物不可信/);
   assert.equal(execGh.callCount, 0);
 });
 
-test('--send 但存在待汇总内容却找不到真实 G1 对账行：exit 2，fail-closed，从不触网（P1#7 回归）', async () => {
-  const storePath = tmpFile('fingerprints.json');
-  const tokenFile = tmpFile('token');
-  writeFileSync(tokenFile, 'ghp_faketoken\n', 'utf8');
-  const execGh = makeFakeExecGh();
+test('--legacy-preview 不得与 --send 混用', async () => {
   const cap = makeCapture();
-
-  const code = await run(
-    ['--findings', FINDINGS, '--repo', REPO, '--store', storePath, '--send', '--token-file', tokenFile, '--commit', 'deadbeef'],
-    { ...cap.opts, execGh },
-  );
-  assert.equal(code, 2);
-  assert.match(cap.stderr, /\[对账信息缺失\]/);
+  const execGh = makeFakeExecGh();
+  const code = await runGate(['--findings', FINDINGS, '--repo', REPO, '--send', '--legacy-preview'], { ...cap.opts, execGh });
+  assert.equal(code, 1);
   assert.equal(execGh.callCount, 0);
 });
 
@@ -498,6 +525,7 @@ test('CLI 子进程烟雾测试：真实 `node issue-gate.mjs` dry-run 仍可正
   const storePath = tmpFile('fingerprints.json');
   const res = spawnSync(process.execPath, [
     CLI,
+    '--legacy-preview',
     '--findings', FINDINGS,
     '--repo', REPO,
     '--store', storePath,
@@ -526,7 +554,7 @@ test('大量单发 issue（>100KB 预览）：真实子进程 dry-run 完整落�
 
   const res = spawnSync(
     process.execPath,
-    [CLI, '--findings', findingsPath, '--repo', REPO, '--store', storePath],
+    [CLI, '--legacy-preview', '--findings', findingsPath, '--repo', REPO, '--store', storePath],
     { encoding: 'utf8', maxBuffer: 10 * 1024 * 1024 },
   );
   assert.equal(res.status, 0, `stderr:\n${res.stderr}`);
