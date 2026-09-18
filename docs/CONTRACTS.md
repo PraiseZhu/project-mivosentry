@@ -24,11 +24,30 @@ state/            运行状态（fingerprints.json 等；.gitignore 排除运行
 reports/          晨报输出（运行产物，不入库；样例入 docs/examples/）
 ```
 
+## 确定性夜巡入口与发布契约（2026-09-17）
+
+本节记录已验收的新链路；下方 G1/G2 的单独调用需同时遵守本节来源校验。
+
+```sh
+scripts/audit/nightly-runner.sh --repo <独立目标仓绝对路径> \
+  --issue-repo xindong/mivo-canvas-plugin --state-dir <状态绝对路径> --out-dir <报告绝对路径>
+```
+
+- wrapper 固定 PATH、TZ=Asia/Shanghai；runner 每轮固定 scanDate/runId，永久 dry-run，不接受 --send。
+- runner 要求自身是干净的独立 Git 根且可执行 git pull --ff-only。候选部署使用冻结本地 origin，不对开发工作树或父仓执行同步；目标 main 的受管同步及锁定依赖准备在审计前完成。
+- runner 退出码：0 completed、5 partial、6 blocked、2 failed。G1 原有 0/1/2/3/4 不变；G1 跑完不等于全维度成功，partial 仍执行 G2 并显式报告缺口。
+- state/manifest-<scanDate>.json：schemaVersion=1，包含 runId、scanDate、repo（真实绝对仓根）、commit、valid、status（completed/partial/failed）、dimensions（dim/bucket/note），以及 artifacts.findings/report（path/sha256）。bucket 为 ok/error/n_a。
+- artifacts 路径相对 manifest 所在目录解析，必须落在批准的 state/out 输出树。findings 仍是数组。发布前校验目标 HEAD 与 status 不变；manifest 最后原子发布，开轮先使旧发布指针失效。碰撞、只读检查失败或中断产物不可消费。
+- 最终 state/nightly-runs/<runId>/receipt.json 与 manifest 的 runId/scanDate/repo/commit 一致，包含同轮 artifacts 路径及 hash、finishedAt、status、各步骤结果。artifacts 路径仍相对 receipt.manifest 所在目录，不相对 receipt 目录。
+- state/nightly-health.json：lastValidDate 接受可信 partial，lastCompleteDate 仅 completed；consecutiveIncomplete 跨进程累积，不重置损坏账本。
+- 自动消费至少校验 schema、显式期望日期/runId、Git 身份、valid/status、输出边界和 hash。G2 必须传 --manifest、--producer-receipt、--scan-date、--run-id、--commit、--target-repo，显式 --report/--state-dir/--out-dir。runner 内 G2 允许消费同轮 G1 已成功但尚未结束的回执；下游交接必须使用最终结束且带 artifacts hash 的回执。
+- 历史无 manifest 的人工预览需显式 --legacy-preview，仅 dry-run；不能覆盖已有无效 manifest，不能用于自动消费或 --send。
+
 ## G1 `scripts/audit/nightly-audit.mjs`
 
 ```
 node scripts/audit/nightly-audit.mjs --repo <目标仓绝对路径> \
-  [--dims csv] [--out-dir reports] [--state-dir state]
+  [--dims csv] [--out-dir reports] [--state-dir state] [--scan-date YYYY-MM-DD] [--run-id ID]
 ```
 
 - 9 个机械维度（全部确定性命令，**零模型调用**）：
@@ -36,7 +55,7 @@ node scripts/audit/nightly-audit.mjs --repo <目标仓绝对路径> \
   `todo-stale`(git blame TODO/FIXME 超 90 天) / `log-violation`(目标仓 `npm run verify:logging`，无此脚本则 n_a) /
   `type-escape`(grep -c `\bany\b`/`as any`/`@ts-ignore`/`@ts-expect-error`，按文件聚合) /
   `secret-pattern`(grep 正则: key/token/password 赋值、dangerouslySetInnerHTML、eval；**测试路径上的凭据命中 skip+计数，不写入 findings**，危险 API 仍写) /
-  `circular-dep`(**仅用目标仓本地 `node_modules/.bin/madge`**；本地二进制不存在才 n_a 并注明；**禁止 npx 联网拉取未锁定版本**) /
+  `circular-dep`(优先目标仓 `scripts/ci/cycle-guard.mjs --json`，否则本地 `node_modules/.bin/madge`；均不存在才 n_a；**禁止 npx 联网拉取未锁定版本**) /
   `test-health`(grep `.skip(`/`.only(` + 新增 src 文件无同名/同目录 test 的清单) /
   `debt-metric`(超 300 行文件、超 80 行函数清单——只报指标不做价值判断；跨日呈现为 delta/首日基线)
 - **n_a 与败的边界**：n_a 仅限"工具/脚本在目标仓不存在"；工具存在但执行非零、启动失败、超时 → 一律计**败**。
@@ -44,7 +63,7 @@ node scripts/audit/nightly-audit.mjs --repo <目标仓绝对路径> \
 - **扫描范围**：文件枚举 = `git ls-files --cached --others --exclude-standard` 叠加 denylist
   （`.claude/**`、`_tmp/**`、`history/**`、`docs/design-previews/**`、`**/*.bundle.js`）；报告展示 scanned/excluded 计数。
 - 每维度独立子进程 + 超时 120s；维度**运行时**失败/超时不中断整轮、如实计败入报。
-- 输出两份：
+- 数据产物两份（另有上述 manifest 发布指针）：
   - `reports/nightly-<YYYY-MM-DD>.md` — **首行必须是对账行**：`派 N 维度 / 成 M / 败 K / n_a J`；
     正文结构：Severity×维度矩阵 + P0/P1 全列 + P2/P3 每维 top5（指向 JSON）+ debt delta；行数预算 ≤200
   - `state/findings-<YYYY-MM-DD>.json` — 数组，每条 schema：
@@ -63,7 +82,7 @@ node scripts/audit/nightly-audit.mjs --repo <目标仓绝对路径> \
 - 退出码：0=跑完（有无 finding 都算）；1=用法错（含未知/重复 --dims，起 worker 前拒绝）；
   2=环境错（repo 不存在/非 git 仓/**pre 只读快照不可得**）；3=指纹碰撞（写诊断 report、不写 findings）；
   4=只读自检失败（含 post 快照不可得；**产物可能已写出但不可信**——自动化不得只用"文件存在"判成功）。
-- **只读保证**：对 --repo 目标零写入。自检 = 跑前后 `git -C <repo> status --porcelain` 一致；
+- **只读保证**：对 --repo 目标零写入。自检 = 跑前后 HEAD 和 `git -C <repo> status --porcelain` 均一致；
   pre 快照在任何 mkdir/写盘之前，post 快照在全部产物写完之后；
   **快照命令自身失败（非零/超时/启动失败）= 自检失败，绝不 fail-open 当 PASS**。
 - **输出路径语义**：`--out-dir`/`--state-dir` 未显式传入时绑定 MivoSentry 脚本仓根（非调用 cwd）；
@@ -90,7 +109,7 @@ node scripts/audit/nightly-audit.mjs --repo <目标仓绝对路径> \
   - **人话解释层**：`render.mjs` 内置 category→人话 / dim→人话 静态文案映射（`explainFinding`），单发 issue 问题描述节首段与汇总"问题"列均使用；纯静态文案无插值，注入面为零；未命中映射回退 category 原文（照常转义）
   - **体量截断指针只写文件名**（如 `findings-<date>.json`），不写夜巡机器绝对路径——issue 在公司仓，绝对路径对读者是死链且泄露目录结构
 - gh 调用**固定形态**：`GH_TOKEN=$(cat <token-file>) gh issue create -R <repo> ...`（实现为 execFile + 隔离 env 注入 GH_TOKEN，语义等价且防注入；清除继承的 GH_*/GITHUB_* 变量、独立空 GH_CONFIG_DIR）——绝不落全局 gh 身份。
-- 默认 dry-run：打印"将单发 N 条 / 汇总 1 条"+ 完整正文预览（预览头显式区分 DRY-RUN/SEND），零网络写、**对 store 零写**。`--send` 才真发。
+- 默认 dry-run：打印"将单发 N 条 / 汇总 M 条"（M 为 0 或 1）+ 正文预览（预览头显式区分 DRY-RUN/SEND），零网络写、**对 store 零写**。`--send` 才真发。
 - **known 语义**：指纹仅在对应 issue **确认创建成功后**逐条标记落盘（成功即刻持久化）；dry-run/预览不消费指纹。
 - **汇总体量 fail-safe**：汇总正文按 60000 字符预算截断表格行 + 尾部"省略 N 行，完整清单见当日 findings JSON"；
   --send 时正文仍超 65000 字符 → exit 2 拒发（防御性）。完整分片方案挂起，待真实夜巡体量数据后另立契约。

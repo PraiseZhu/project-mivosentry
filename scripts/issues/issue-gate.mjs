@@ -42,6 +42,7 @@ import { fileURLToPath } from 'node:url';
 import { loadStore, isKnown, markSeen, save, StoreCorruptError } from './fingerprint.mjs';
 import { classify, validateFindingsShape, FindingsFormatError } from './classify.mjs';
 import { renderSingleIssue, renderSummaryIssue } from './render.mjs';
+import { validateManifest, artifactPaths, validateProducerReceipt } from '../audit/run-contract.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -77,12 +78,22 @@ export function parseArgs(argv) {
       case '--commit':
         args.commit = argv[++i];
         break;
+      case '--manifest': args.manifest = argv[++i]; break;
+      case '--scan-date': args.scanDate = argv[++i]; break;
+      case '--run-id': args.runId = argv[++i]; break;
+      case '--producer-receipt': args.producerReceipt = argv[++i]; break;
+      case '--expected-dims': args.expectedDims = argv[++i]; break;
+      case '--target-repo': args.targetRepo = argv[++i]; break;
+      case '--state-dir': args.stateDir = argv[++i]; break;
+      case '--out-dir': args.outDir = argv[++i]; break;
+      case '--legacy-preview': args.legacyPreview = true; break;
       default:
         throw new UsageError(`未知参数: ${a}`);
     }
   }
   if (!args.findings) throw new UsageError('缺少必需参数 --findings');
   if (!args.repo) throw new UsageError('缺少必需参数 --repo');
+  if (args.legacyPreview && args.send) throw new UsageError('--legacy-preview 只允许历史人工预览，不允许 --send');
   return args;
 }
 
@@ -238,6 +249,34 @@ export async function run(argv, { log = console.log, error = console.error, exec
   }
 
   let findingsRaw;
+  let manifest = null;
+  const candidate = args.manifest || join(dirname(resolve(args.findings)), 'manifest-' + (args.scanDate || deriveScanDate(args.findings)) + '.json');
+  // Explicit historical previews never override an existing invalid manifest.
+  if (!args.legacyPreview || args.manifest || existsSync(candidate)) {
+    try {
+      const stateDir = resolve(args.stateDir || dirname(candidate));
+      const outDir = resolve(args.outDir || join(dirname(stateDir), 'reports'));
+      const outputRoots = [stateDir, outDir];
+      validateProducerReceipt(args.producerReceipt, { runId: args.runId, scanDate: args.scanDate,
+        repo: args.targetRepo, commit: args.commit, manifest: candidate });
+      manifest = validateManifest(candidate, {
+        scanDate: args.scanDate, runId: args.runId, commit: args.commit, repo: args.targetRepo,
+        findings: resolve(args.findings), report: args.report && resolve(args.report), outputRoots,
+        dimensions: args.expectedDims?.split(','),
+      });
+      const paths = artifactPaths(candidate, manifest, outputRoots);
+      args.report = paths.report;
+      args.commit = manifest.commit;
+      args.findings = paths.findings;
+      log('[issue-gate] 来源 runId=' + manifest.runId + ' commit=' + manifest.commit + ' status=' + manifest.status);
+      if (manifest.status === 'partial') log('[部分完成] 检查缺口: ' + manifest.dimensions.filter(d => d.bucket !== 'ok').map(d => d.dim + ': ' + d.note).join('; '));
+    } catch (err) {
+      error('[产物不可信] ' + err.message);
+      return 1;
+    }
+  } else {
+    log('[历史人工预览] 未验证日期、Git 身份或完整性，不能用作自动化完成证据');
+  }
   try {
     findingsRaw = JSON.parse(readFileSync(resolve(args.findings), 'utf8'));
   } catch (err) {
@@ -282,7 +321,7 @@ export async function run(argv, { log = console.log, error = console.error, exec
   // classify() 内部对 isKnown 只做只读判断；dry-run 与 send 走到这里之前都不产生任何 store 写入。
   const classified = classify(findingsRaw, { isKnown });
 
-  const scanDate = deriveScanDate(args.findings);
+  const scanDate = manifest ? manifest.scanDate : deriveScanDate(args.findings);
   const { line: reckoningLine, source: reportSource } = resolveReckoningLine(args.findings, args.report);
   const commit = args.commit ?? 'unknown';
 
